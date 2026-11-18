@@ -128,7 +128,7 @@ runs.
 | Query | What happens | Answer |
 |---|---|---|
 | `Read all resumes in the resumes folder` | `list_files`, then `read_file` per file | Summary of all 8 candidates |
-| `Find resumes mentioning Python` | `list_files`, then `search_in_file` per file (in parallel) | John Doe, Kenji Tanaka, Liam Walsh, Priya Sharma |
+| `Find resumes mentioning Python experience` | `list_files`, then `search_in_file` for `Python` per file (in parallel) | John Doe, Kenji Tanaka, Liam Walsh, Priya Sharma |
 | `Create a summary file for resume_john_doe.pdf` | `read_file`, then `write_file` | Writes `summaries/resume_john_doe_summary.md` |
 | `Who knows Kubernetes?` | `search_in_file` per file | Marcus Chen, Kenji Tanaka |
 | `Which candidates have 5+ years of experience?` | `search_in_file` per file | Elena Rodriguez, John Doe, Kenji Tanaka, Marcus Chen, Priya Sharma |
@@ -315,22 +315,44 @@ case – is [sample_data/MANIFEST.md](sample_data/MANIFEST.md).
 
 ## Brief → implementation mapping
 
-| Requirement | Implemented in | Tested in |
+**Part A – file-system tools ([`fs_tools.py`](fs_tools.py))**
+
+| Brief requirement | Implemented in | Tested in |
 |---|---|---|
-| **Part A** `read_file(filepath) -> dict` (PDF, TXT, DOCX) | [`fs_tools.py`](fs_tools.py) `read_file` | [`tests/test_read_file.py`](tests/test_read_file.py), [`tests/test_sandbox.py`](tests/test_sandbox.py) |
-| **Part A** `list_files(directory, extension=None) -> list` | [`fs_tools.py`](fs_tools.py) `list_files` | [`tests/test_list_files.py`](tests/test_list_files.py) |
-| **Part A** `write_file(filepath, content) -> dict` | [`fs_tools.py`](fs_tools.py) `write_file` | [`tests/test_write_file.py`](tests/test_write_file.py) |
-| **Part A** `search_in_file(filepath, keyword) -> dict` | [`fs_tools.py`](fs_tools.py) `search_in_file` | [`tests/test_search_in_file.py`](tests/test_search_in_file.py) |
-| **Part B** Tools exposed to an LLM via function calling | [`assistant/registry.py`](assistant/registry.py) (schemas + dispatch), [`assistant/providers/gemini.py`](assistant/providers/gemini.py) | [`tests/test_registry.py`](tests/test_registry.py), [`tests/test_gemini_provider.py`](tests/test_gemini_provider.py) |
-| **Part B** Function-calling loop (model ⇄ tools until an answer) | [`assistant/agent.py`](assistant/agent.py) | [`tests/test_agent.py`](tests/test_agent.py) |
-| **Part B** Example query: "Read all resumes in the resumes folder" | agent + `list_files`/`read_file` | `test_e2e_read_all_resumes` in [`tests/test_agent.py`](tests/test_agent.py); live run above |
-| **Part B** Example query: "Find resumes mentioning Python" | agent + `search_in_file` | `test_e2e_find_resumes_mentioning_python`; [live session](#example-session) |
-| **Part B** Example query: "Create a summary file for resume_john_doe.pdf" | agent + `read_file`/`write_file` | `test_e2e_create_summary_file`; live run above |
-| **Part B** Runnable assistant (`llm_file_assistant.py`) | [`llm_file_assistant.py`](llm_file_assistant.py), [`assistant/render.py`](assistant/render.py) | [`tests/test_cli.py`](tests/test_cli.py) |
-| **Deliverable** Source code | this repository | CI |
-| **Deliverable** Sample resumes | [`sample_data/`](sample_data/), [`scripts/generate_samples.py`](scripts/generate_samples.py) | [MANIFEST.md](sample_data/MANIFEST.md) answer key |
-| **Deliverable** README / documentation | this file, [DESIGN.md](DESIGN.md) | relative links checked |
-| **Deliverable** Demo video | **TODO – link at the top of this file** | – |
+| `read_file(filepath) → dict`: read PDF/TXT/DOCX, extract text, return structured content + metadata, handle errors gracefully | `read_file` → `_load_document` / `_extract_text` (pypdf, python-docx incl. tables, UTF-8 → cp1252 → latin-1 fallback); returns `content` + `metadata`; every failure is an error envelope with a stable code, never an exception | [`tests/test_read_file.py`](tests/test_read_file.py), [`tests/test_sandbox.py`](tests/test_sandbox.py) |
+| `list_files(directory, extension=None) → list`: list files, filter by extension, return name/size/modified date | `list_files`: one dict per file with `name`, `size_bytes`, `modified` (ISO 8601 UTC) plus `path`, `extension`, `supported`; case-insensitive filter accepting `pdf` / `.pdf` / `*.pdf` | [`tests/test_list_files.py`](tests/test_list_files.py) |
+| `write_file(filepath, content) → dict`: write content, create directories if needed, return success/failure status | `write_file`: atomic write, creates missing parent directories (reported in `created_dirs`), returns the `success` envelope with `overwritten`; text formats only | [`tests/test_write_file.py`](tests/test_write_file.py) |
+| `search_in_file(filepath, keyword) → dict`: search keyword in file content, return matches with surrounding context, case-insensitive | `search_in_file`: case-insensitive literal search over the same extracted text as `read_file`; each match has ±60 characters of `context`, `line_number`, `page` (PDF) and offsets; optional `whole_word` | [`tests/test_search_in_file.py`](tests/test_search_in_file.py) |
+
+**Part B – LLM integration ([`llm_file_assistant.py`](llm_file_assistant.py))**
+
+| Brief requirement | Implemented in | Tested in |
+|---|---|---|
+| Integrate the tools with an LLM | Tool schemas + validating dispatcher in [`assistant/registry.py`](assistant/registry.py); Gemini via [`assistant/providers/gemini.py`](assistant/providers/gemini.py) | [`tests/test_registry.py`](tests/test_registry.py), [`tests/test_gemini_provider.py`](tests/test_gemini_provider.py) |
+| The LLM calls tools based on user queries | Hand-written function-calling loop in [`assistant/agent.py`](assistant/agent.py) (automatic function calling disabled) | [`tests/test_agent.py`](tests/test_agent.py) |
+| Runnable assistant with the tool calls visible | CLI (REPL and `-q`) in [`llm_file_assistant.py`](llm_file_assistant.py), rendering in [`assistant/render.py`](assistant/render.py) | [`tests/test_cli.py`](tests/test_cli.py) |
+| Example: "Read all resumes in the resumes folder" | `list_files` → `read_file` per file | `test_e2e_read_all_resumes`; verified live |
+| Example: "Find resumes mentioning Python experience" | `list_files` → `search_in_file` per file | `test_e2e_find_resumes_mentioning_python`; verified live with this exact wording (same 4 resumes as the [example session](#example-session), which used "…mentioning Python") |
+| Example: "Create a summary file for resume_john_doe.pdf" | `read_file` → `write_file` to `summaries/resume_john_doe_summary.md` | `test_e2e_create_summary_file`; verified live |
+
+**Deliverables**
+
+| Brief deliverable | Where |
+|---|---|
+| Source code with proper documentation | This repository: docstrings on every public module, class and function (enforced by ruff's pydocstyle `D100`–`D107` rules in CI), [DESIGN.md](DESIGN.md), this README |
+| `requirements.txt` | [`requirements.txt`](requirements.txt) (pinned runtime dependencies); [`requirements-dev.txt`](requirements-dev.txt) adds the test tools |
+| 5–10 dummy resume files | 8 resumes (3 PDF, 3 DOCX, 2 TXT) in [`sample_data/resumes/`](sample_data/resumes/), generated by [`scripts/generate_samples.py`](scripts/generate_samples.py); answer key in [MANIFEST.md](sample_data/MANIFEST.md) |
+| README.md with setup and usage instructions | This file: [Setup](#setup), [Usage](#usage) |
+| Demo video (2–3 min) showing tool calling in action | **TODO – link at the top of this file** |
+
+**Learning objectives**
+
+| Objective | Where it shows |
+|---|---|
+| LLM function calling / tool use | Tool schemas sent on every turn; the model's function calls are validated, dispatched and answered by [`assistant/agent.py`](assistant/agent.py), with Gemini's automatic function calling disabled; parallel calls in one turn are supported |
+| Structured tool interfaces | Typed signatures, hand-written JSON Schemas kept in sync with them by a test, and one `{"success", "data", "error"}` envelope with stable error codes ([DESIGN.md §2](DESIGN.md#2-result-envelope-and-errors)) |
+| Programmatic file I/O | Sandboxed path resolution, directory listing, atomic writes with parent-directory creation ([`fs_tools.py`](fs_tools.py)) |
+| Document parsing and validation | PDF/DOCX/TXT extraction with encoding fallback and control-character sanitising, plus [`sample_data/edge_cases/`](sample_data/edge_cases/) (corrupt, empty, no-text, cp1252, unsupported); arguments validated against the schemas before any tool runs |
 
 ## Project structure
 

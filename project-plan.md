@@ -18,4 +18,5 @@ Vertical slices; each one leaves `ruff check .`, `ruff format --check .` (and, f
 - [x] **8b. Gemini provider (manual function calling, error mapping, retries)**
 - [x] **9. Agent loop** + tests with `FakeProvider` (multi-call turns, errors, iteration cap).
 - [x] **10. CLI** – REPL, `--query`, rich tool-call trace.
-- [x] **11. README + demo** – setup, usage, architecture, example queries, demo script.
+- [x] **11. README + docs polish** – setup, usage, architecture, example queries (the demo video
+      is recorded separately).

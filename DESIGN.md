@@ -8,10 +8,10 @@ calling a small set of sandboxed file-system tools through function calling.
   hand-written agent loop, and a CLI.
 
 ```
-┌──────────────────────┐   user query    ┌──────────────┐  generate(msgs, tools)  ┌─────────────┐
-│ llm_file_assistant.py│ ──────────────▶ │  Agent loop  │ ──────────────────────▶ │ LLMProvider │
-│  (REPL / --query)    │ ◀────────────── │ (assistant/) │ ◀────────────────────── │  (Gemini…)  │
-└──────────────────────┘  answer + trace └──────┬───────┘   text | tool calls     └─────────────┘
+┌──────────────────────┐   user query    ┌──────────────┐  generate(system_prompt, messages, tools)  ┌─────────────┐
+│ llm_file_assistant.py│ ──────────────▶ │  Agent loop  │ ─────────────────────────────────────────▶ │ LLMProvider │
+│  (REPL / --query)    │ ◀────────────── │ (assistant/) │ ◀───────────────────────────────────────── │  (Gemini…)  │
+└──────────────────────┘  answer + trace └──────┬───────┘   text | tool calls                        └─────────────┘
                                                 │ dispatch(name, args)
                                          ┌──────▼───────┐
                                          │ Tool registry│  JSON schemas + exception → envelope
@@ -21,7 +21,7 @@ calling a small set of sandboxed file-system tools through function calling.
                                          └──────────────┘
 ```
 
-Planned layout:
+Module layout:
 
 | Path | Role |
 |---|---|
@@ -36,7 +36,7 @@ Planned layout:
 | `assistant/providers/gemini.py` | Gemini implementation (`google-genai`) |
 | `llm_file_assistant.py` | CLI |
 | `scripts/generate_samples.py` | Generates sample resumes + edge cases |
-| `tests/` | pytest suite (includes `FakeProvider`) |
+| `tests/` | pytest suite (`conftest.py` fixtures, `helpers.py` envelope assertions); the scripted LLM is `FakeProvider` from `assistant/providers/fake.py` |
 
 ---
 
@@ -132,7 +132,9 @@ in parallel).
 
 ## 3. Path sandbox
 
-LLM-supplied paths are **untrusted input**. Every tool resolves its path through one helper:
+LLM-supplied paths are **untrusted input**. Every path goes through one helper, `_resolve_path`.
+The only shortcut is `list_files`, which maps `""` and `"."` straight to the (already resolved)
+workspace root. `_resolve_path` works like this:
 
 1. Reject empty paths and paths containing NUL bytes.
 2. `root = Path(WORKSPACE_ROOT).resolve()` (read from env on every call, default `./sample_data`,
@@ -150,7 +152,9 @@ the absolute host path. For
 
 ## 4. Text extraction and search
 
-One internal `extract_text(path) -> (text, metadata)` dispatches on extension:
+`_load_document(filepath)` resolves the path through the sandbox, checks that it exists, is a
+regular file with a supported extension and is under the size cap, then calls
+`_extract_text(path) -> (text, metadata)`, which dispatches on extension:
 
 | Format | Method |
 |---|---|
@@ -397,9 +401,28 @@ and returns to the prompt.
   are committed. Coverage includes each format, encoding fallback, corrupt/empty files, sandbox
   escapes (`..`, outside-absolute, symlink – skipped where the OS disallows symlinks), atomic
   overwrite, and search positions/context.
-- **Agent loop**: a `FakeProvider` replays a scripted list of `LLMResponse`s (tool calls then a final
-  answer) and records the messages it received, so tests assert on dispatch order, multi-call turns,
-  error recovery and the iteration cap.
+- **Tool registry** (`tests/test_registry.py`): a drift guard keeps each schema's properties and
+  `required` list equal to the function signature; a recursive walk allows only the portable schema
+  keys; dispatch covers argument validation, `UNKNOWN_TOOL`, error-envelope wrapping, the
+  `list_files` wrapper, the `read_file` truncation guard and JSON-serialisability.
+- **Providers** (`tests/test_providers.py`): the lazy registry (a subprocess checks that importing
+  `assistant.providers` never imports `google.genai`), unknown names, and `FakeProvider` itself.
+- **Gemini** (`tests/test_gemini_provider.py`): a fake client whose `models.generate_content`
+  records its arguments and returns real `google-genai` response objects built by hand. Covers the
+  request config (automatic function calling off, all four declarations), history and response
+  conversion, `provider_state` passed through as the same object, and the failure mapping and
+  retries via an injected `sleep`.
+- **Agent loop** (`tests/test_agent.py`): a `FakeProvider` replays a scripted list of `LLMResponse`s
+  (tool calls then a final answer) and records the messages it received, so tests assert on
+  dispatch order, multi-call turns, error recovery, provider-error rollback and the iteration cap.
+  A fake clock makes event durations exact. End-to-end tests run the brief's three example queries
+  through the real dispatcher on generated files.
+- **CLI** (`tests/test_cli.py`): `main()` with `FakeProvider` via `provider_factory`, scripted REPL
+  input, a recording rich `Console` and `load_env=False` (the real `.env` is never read). Covers
+  `summarize_result`, one-shot exit codes, startup errors, `--verbose`, the REPL commands,
+  EOF/Ctrl-C handling, and `--help` in a subprocess.
+- **Symlink-escape tests** (2, in `test_sandbox.py` and `test_list_files.py`) need `os.symlink`.
+  They are skipped on Windows without Developer Mode or admin rights and run in CI on Linux.
 - **No real LLM calls** in tests or CI; no network.
 - **Deterministic**: no hardcoded dates or wall-clock/random values in assertions – timestamps are
   checked for type/format or compared against values read from the file itself.
