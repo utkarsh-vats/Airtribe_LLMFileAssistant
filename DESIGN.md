@@ -27,7 +27,8 @@ Planned layout:
 |---|---|
 | `fs_tools.py` | Part A tools, sandbox, extraction, `FsToolError` |
 | `assistant/registry.py` | Tool JSON schemas + dispatcher |
-| `assistant/agent.py` | Agent loop |
+| `assistant/agent.py` | Agent loop, `AgentResult`, events |
+| `assistant/prompts.py` | `DEFAULT_SYSTEM_PROMPT` |
 | `assistant/providers/__init__.py` | Provider registry (`get_provider`, lazy imports) |
 | `assistant/providers/base.py` | `LLMProvider` ABC, neutral message/tool-call types, `LLMProviderError` |
 | `assistant/providers/fake.py` | `FakeProvider`: scripted responses for tests and offline demos |
@@ -287,25 +288,60 @@ Retryable errors are retried up to `max_retries` times with exponential backoff 
 the injected `sleep`; then the last error is raised. The SDK's own retries stay off (no
 `HttpRetryOptions`, so it makes a single attempt), so the two never multiply.
 
-**Agent loop** (`assistant/agent.py`):
+**Agent loop** (`assistant/agent.py`, system prompt in `assistant/prompts.py`).
+`Agent(provider, *, system_prompt, max_iterations, dispatch, tools, on_event, clock)` keeps
+`agent.history: list[Message]` across `run()` calls (multi-turn REPL; `reset()` clears it).
+`max_iterations` defaults to the `MAX_TOOL_ITERATIONS` env var, else 10, and caps `generate()`
+calls per `run()`.
 
 ```
-messages = [system prompt, user query]
-for i in range(MAX_TOOL_ITERATIONS):
-    resp = provider.generate(messages, tools)
-    if not resp.tool_calls:
-        return resp.text                     # final answer
-    messages.append(assistant turn with resp.tool_calls)
-    for call in resp.tool_calls:            # supports parallel calls in one turn
-        result = registry.dispatch(call.name, call.args)   # always an envelope
-        on_tool_call(call, result)          # CLI trace hook
-        messages.append(tool response for call.id)
-return "stopped: reached MAX_TOOL_ITERATIONS"   # graceful, not an exception
+run(user_text):
+    checkpoint = len(history); history += [user(user_text)]
+    for iteration in 1, 2, ...:
+        resp = provider.generate(system_prompt, history, tools)      # tools sent every time
+        emit ModelTurn(iteration, resp.text, resp.tool_calls, resp.usage)
+        history += [assistant(resp.text, resp.tool_calls, provider_state=resp.provider_state)]
+        if not resp.tool_calls:
+            return AgentResult(resp.text, "completed", ...)
+        if iteration == max_iterations:                              # never exceed the cap
+            history += [tool(NOT_EXECUTED result per pending call), assistant(fixed text)]
+            return AgentResult(fixed text, "max_iterations", ...)
+        results = []
+        for call in resp.tool_calls:                                 # parallel calls, in order
+            emit ToolCallStarted(call)
+            result = dispatch(call.name, call.args)                  # always an envelope
+            emit ToolCallFinished(call, result, duration_ms)         # via the injected clock
+            results += [ToolResult(call.id, call.name, result)]
+        history += [tool(results)]                                   # one message per turn
+on LLMProviderError:
+    del history[checkpoint:]                                         # as if run() never started
+    return AgentResult(None, "provider_error", error=exc.message)
 ```
 
-Unknown tool names and invalid arguments produce error envelopes (`UNKNOWN_TOOL`,
-`INVALID_ARGUMENT`) fed back to the model so it can recover. Config (`GEMINI_API_KEY`,
-`GEMINI_MODEL`, `WORKSPACE_ROOT`, `MAX_TOOL_ITERATIONS`) is loaded from `.env` via `python-dotenv`.
+- **Model mistakes are data, not exceptions**: unknown tools and bad arguments come back from
+  `dispatch` as `UNKNOWN_TOOL` / `INVALID_ARGUMENT` envelopes, which go to the model so it can
+  correct itself.
+- **Iteration cap**: calls requested on the last allowed turn are *not executed* (no side effects
+  the model never sees); each gets a `NOT_EXECUTED` result so every function call still has a
+  response, and a fixed assistant message closes the turn, so the history stays valid for the
+  next `run()`.
+- **Provider errors** roll the history back to its pre-`run()` state so a half-finished turn can't
+  corrupt the next request; they are reported, not raised. Tools that already ran are not undone
+  (e.g. a file already written), and they are still listed in `AgentResult.tool_calls`. Any other
+  exception propagates.
+- `AgentResult(text, stopped_reason, iterations, tool_calls, usage, error)`: `tool_calls` is the
+  executed `(ToolCall, envelope)` pairs and `usage` the numeric token counts summed across turns.
+- The agent never prints; the CLI renders the `ModelTurn` / `ToolCallStarted` /
+  `ToolCallFinished` events.
+
+**System prompt** (`DEFAULT_SYSTEM_PROMPT`): workspace-relative forward-slash paths; discover with
+`list_files`, never guess; to find mentions, `list_files` then one `search_in_file` per file (in
+parallel), `whole_word=true` for short or ambiguous terms; summaries go to
+`summaries/<file-stem>_summary.md` after a `read_file`, never into `resumes/`; answer only from tool
+results, report tool errors plainly and carry on; concise answers that name their source files.
+
+Config (`GEMINI_API_KEY`, `GEMINI_MODEL`, `WORKSPACE_ROOT`, `MAX_TOOL_ITERATIONS`) is loaded from
+`.env` via `python-dotenv` by the CLI.
 
 ## 7. CLI
 
