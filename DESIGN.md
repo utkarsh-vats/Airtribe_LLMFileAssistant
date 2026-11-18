@@ -67,7 +67,7 @@ Representative `data` payloads:
 | Tool | `data` |
 |---|---|
 | `read_file` | `{"content", "metadata": {"path", "name", "extension", "size_bytes", "modified", "char_count", "word_count", "page_count"?, "encoding"?, "warnings"}}` – `page_count` for PDF only, `encoding` for TXT/MD only; `modified` is ISO 8601 UTC |
-| `write_file` | `{"path", "bytes_written", "overwritten": bool}` |
+| `write_file` | `{"path", "name", "size_bytes", "overwritten": bool, "created_dirs": [str], "modified"}` – `created_dirs` lists the workspace-relative directories it created |
 | `search_in_file` | `{"path", "keyword", "match_count", "matches": [{"position", "line", "context"}]}` |
 
 **`list_files`** returns a `list` per spec – one dict per file:
@@ -95,6 +95,7 @@ Error codes (stable strings, safe to show to the LLM):
 | `NOT_A_FILE` / `NOT_A_DIRECTORY` | Wrong kind of path |
 | `UNSUPPORTED_FORMAT` | Extension not supported for this operation |
 | `FILE_TOO_LARGE` | File exceeds the read cap (10 MB), checked before reading |
+| `CONTENT_TOO_LARGE` | `write_file` content exceeds the write cap (1 MB, UTF-8 encoded) |
 | `EXTRACTION_FAILED` | Corrupt/unreadable PDF or DOCX |
 | `PERMISSION_DENIED` | OS-level permission error |
 | `IO_ERROR` | Other `OSError` |
@@ -148,13 +149,19 @@ capped (e.g. 50) with a `truncated` flag to keep tool responses small.
 
 ## 5. `write_file`
 
-- **Atomic**: write to a temp file in the target's directory (`tempfile.NamedTemporaryFile(delete=False,
-  dir=parent)`), flush + `fsync`, then `os.replace(tmp, target)`. The temp file is removed on failure,
-  so a crash never leaves a half-written target.
-- Creates missing parent directories (after the sandbox check).
-- **Text only**: allowed extensions `.txt` and `.md`; anything else → `UNSUPPORTED_FORMAT`. This
-  prevents the LLM from clobbering source PDFs/DOCX files with plain text.
-- Writes UTF-8. Metadata reports `bytes_written` and `overwritten` (whether the target existed).
+- **Atomic**: write to a hidden temp file in the target's directory (`tempfile.mkstemp`, name
+  starting with `.` so `list_files` never shows it), flush + `fsync`, then `os.replace(tmp, target)`.
+  On any failure the temp file is removed and an existing target is left untouched, so a crash never
+  leaves a half-written target. The target keeps its previous permission bits (new files get
+  `0o644`, since `mkstemp` would otherwise leave `0o600`).
+- Creates missing parent directories only after the sandbox check passes, and reports them in
+  `created_dirs`. A path component that is an existing file → `NOT_A_DIRECTORY`; a target that is
+  a directory → `NOT_A_FILE`; a missing workspace root → `NOT_FOUND` (the root is never created).
+- **Text only**: allowed extensions `.txt` and `.md` (case-insensitive); anything else →
+  `UNSUPPORTED_FORMAT`. This prevents the LLM from clobbering source PDFs/DOCX files with plain text.
+- `content` must be a `str` (empty is allowed) → otherwise `INVALID_ARGUMENT`, as is text that
+  can't be UTF-8 encoded (lone surrogates). Encoded size over 1 MB → `CONTENT_TOO_LARGE`.
+- Writes UTF-8 with `newline=""`, so `"\n"` is never translated to `"\r\n"` on Windows.
 
 ## 6. LLM layer
 

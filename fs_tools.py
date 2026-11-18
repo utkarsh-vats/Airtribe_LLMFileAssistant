@@ -8,14 +8,15 @@ Exposes four tools intended to be called by an LLM via function calling:
 - ``search_in_file(filepath, keyword) -> dict``
 
 All paths are resolved inside ``WORKSPACE_ROOT``. See DESIGN.md for the
-result envelope, error codes and sandbox rules. ``read_file`` and
-``list_files`` are implemented; the other tools land in later steps of
-project-plan.md.
+result envelope, error codes and sandbox rules. ``search_in_file`` lands in
+a later step of project-plan.md.
 """
 
+import contextlib
 import logging
 import os
 import re
+import tempfile
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_ROOT = "./sample_data"
 MAX_READ_BYTES = 10 * 1024 * 1024  # 10 MB
+MAX_WRITE_BYTES = 1024 * 1024  # 1 MB of UTF-8 encoded content
 TEXT_EXTENSIONS = frozenset({".txt", ".md"})
 READ_EXTENSIONS = TEXT_EXTENSIONS | {".pdf", ".docx"}
 TEXT_ENCODINGS = ("utf-8", "cp1252", "latin-1")  # latin-1 decodes any byte sequence
@@ -45,6 +47,7 @@ class ErrorCode(StrEnum):
     NOT_A_DIRECTORY = "NOT_A_DIRECTORY"
     UNSUPPORTED_FORMAT = "UNSUPPORTED_FORMAT"
     FILE_TOO_LARGE = "FILE_TOO_LARGE"
+    CONTENT_TOO_LARGE = "CONTENT_TOO_LARGE"
     EXTRACTION_FAILED = "EXTRACTION_FAILED"
     PERMISSION_DENIED = "PERMISSION_DENIED"
     IO_ERROR = "IO_ERROR"
@@ -315,3 +318,100 @@ def list_files(directory: str, extension: str | None = None) -> list:
         )
     files.sort(key=lambda f: (f["name"].casefold(), f["name"]))
     return files
+
+
+def _validate_content(content: str) -> None:
+    if not isinstance(content, str):
+        raise FsToolError(ErrorCode.INVALID_ARGUMENT, "Content must be a string.")
+    try:
+        size = len(content.encode("utf-8"))
+    except UnicodeEncodeError as exc:  # e.g. lone surrogates
+        raise FsToolError(ErrorCode.INVALID_ARGUMENT, "Content is not valid Unicode text.") from exc
+    if size > MAX_WRITE_BYTES:
+        raise FsToolError(
+            ErrorCode.CONTENT_TOO_LARGE,
+            f"Content is {size} bytes when UTF-8 encoded; the limit is {MAX_WRITE_BYTES} bytes.",
+        )
+
+
+def _ensure_parent_dirs(path: Path) -> list[str]:
+    """Create missing parent directories of ``path`` (inside the root); return those created."""
+    root = _workspace_root()
+    if not root.is_dir():
+        raise FsToolError(ErrorCode.NOT_FOUND, "The workspace root directory does not exist.")
+    created = []
+    current = root
+    for part in path.parent.relative_to(root).parts:
+        current = current / part
+        if current.is_dir():
+            continue
+        if current.exists():
+            raise FsToolError(
+                ErrorCode.NOT_A_DIRECTORY,
+                f"'{_display_path(current)}' is a file, so it cannot contain other files.",
+            )
+        current.mkdir()
+        created.append(_display_path(current))
+    return created
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """Write via a hidden temp file in the same directory, then ``os.replace`` onto ``path``.
+
+    On any failure the temp file is removed and an existing target is left untouched.
+    """
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o644  # mkstemp creates 0o600
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(tmp_name)
+    try:
+        with open(fd, "w", encoding="utf-8", newline="") as handle:  # no "\r\n" translation
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
+
+
+def write_file(filepath: str, content: str) -> dict:
+    """Atomically write UTF-8 text to a .txt or .md file, creating parent directories.
+
+    Never raises: every failure is returned as an error envelope.
+    """
+    try:
+        path = _resolve_path(filepath)
+        display = _display_path(path)
+        if path.suffix.lower() not in TEXT_EXTENSIONS:
+            supported = ", ".join(sorted(TEXT_EXTENSIONS))
+            raise FsToolError(
+                ErrorCode.UNSUPPORTED_FORMAT,
+                f"Cannot write '{path.suffix or path.name}' files. Supported: {supported}.",
+            )
+        _validate_content(content)
+        try:
+            if path.is_dir():
+                raise FsToolError(ErrorCode.NOT_A_FILE, f"'{display}' is a directory.")
+            created_dirs = _ensure_parent_dirs(path)
+            overwritten = path.exists()
+            _atomic_write(path, content)
+            stat = path.stat()
+        except OSError as exc:
+            raise _os_error(exc, display) from exc
+        return _ok(
+            {
+                "path": display,
+                "name": path.name,
+                "size_bytes": stat.st_size,
+                "overwritten": overwritten,
+                "created_dirs": created_dirs,
+                "modified": _iso_utc(stat.st_mtime),
+            }
+        )
+    except FsToolError as exc:
+        return _err(exc.code, exc.message)
+    except Exception:
+        logger.exception("write_file failed unexpectedly")
+        return _err(ErrorCode.INTERNAL_ERROR, "Unexpected internal error while writing the file.")
