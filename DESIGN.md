@@ -28,7 +28,9 @@ Planned layout:
 | `fs_tools.py` | Part A tools, sandbox, extraction, `FsToolError` |
 | `assistant/registry.py` | Tool JSON schemas + dispatcher |
 | `assistant/agent.py` | Agent loop |
-| `assistant/providers/base.py` | `LLMProvider` ABC, neutral message/tool-call types, provider registry |
+| `assistant/providers/__init__.py` | Provider registry (`get_provider`, lazy imports) |
+| `assistant/providers/base.py` | `LLMProvider` ABC, neutral message/tool-call types, `LLMProviderError` |
+| `assistant/providers/fake.py` | `FakeProvider`: scripted responses for tests and offline demos |
 | `assistant/providers/gemini.py` | Gemini implementation (`google-genai`) |
 | `llm_file_assistant.py` | CLI |
 | `scripts/generate_samples.py` | Generates sample resumes + edge cases |
@@ -202,20 +204,52 @@ a no-text PDF) are passed through; an empty document or no hits is a success wit
 
 ## 6. LLM layer
 
-**Provider abstraction.** `LLMProvider` is an ABC with one core method:
+**Provider abstraction** (`assistant/providers/base.py`). `LLMProvider` is an ABC with one core
+method:
 
 ```python
 class LLMProvider(ABC):
     name: ClassVar[str]
 
     @abstractmethod
-    def generate(self, messages: list[Message], tools: list[ToolSpec]) -> LLMResponse: ...
+    def generate(
+        self, system_prompt: str, messages: Sequence[Message], tools: list[dict]
+    ) -> LLMResponse: ...
 ```
 
-`Message`, `ToolSpec`, `ToolCall(id, name, args)` and `LLMResponse(text, tool_calls)` are
-provider-neutral dataclasses; each provider translates to/from its SDK types. A registry maps names to
-classes (`register_provider("gemini", GeminiProvider)`, `get_provider(name)`), so a new provider is
-one module + one registration, and the CLI picks it with `--provider`.
+`tools` is `registry.get_tool_schemas()` output. The agent loop speaks only these frozen,
+provider-neutral dataclasses; each provider translates them to and from its SDK types:
+
+| Type | Fields |
+|---|---|
+| `ToolCall` | `id`, `name`, `args` |
+| `ToolResult` | `call_id`, `name`, `result` (the dispatcher envelope) |
+| `Message` | `role` (`user` / `assistant` / `tool`), `text`, `tool_calls`, `tool_results`, `provider_state` |
+| `LLMResponse` | `text`, `tool_calls`, `provider_state`, `usage` |
+
+An assistant message may carry `tool_calls`; one `tool` message carries the results of every call
+from that turn. Provider failures raise `LLMProviderError(message, retryable=...)`: a user-safe
+message (no keys, no tracebacks) plus a flag marking transient failures worth retrying.
+
+**`provider_state`** is opaque per-provider data that the loop copies from each `LLMResponse` onto
+the assistant `Message` it stores, and hands back unchanged. Gemini 3 requires its original
+response content – including *thought signatures* attached to function-call parts – to be replayed
+on the next turn, and rebuilding it from the neutral fields would drop them. Providers that don't
+need it leave it `None`.
+
+**Registry** (`assistant/providers/__init__.py`). Names map to `"module:Class"` strings (`"gemini"`
+→ `assistant.providers.gemini:GeminiProvider`, `"fake"` → `assistant.providers.fake:FakeProvider`)
+and `get_provider(name, **kwargs)` imports the module only when it is resolved, so importing the
+package never imports `google.genai`. An unknown name, or a provider whose module or SDK is
+missing, raises `LLMProviderError` (never `ImportError`). Adding a provider is one module plus one
+mapping entry; the CLI picks it with `--provider`.
+
+**`FakeProvider`** (`"fake"`) replays a scripted list of `LLMResponse`s, one per `generate` call,
+and records deep copies of every call in `.calls`. Builders `reply(text)`, `call(name, args)` and
+`parallel((name, args), ...)` keep scripts readable; calls without an explicit id get
+deterministic ids `call_1`, `call_2`, ... per instance. An exhausted script raises
+`LLMProviderError`. It drives every agent-loop test (no network, no API key) and can run an
+offline demo of the CLI.
 
 **Gemini first** via `google-genai`. Tools are passed as `FunctionDeclaration`s built from the
 registry's JSON schemas. **Automatic function calling is disabled**
