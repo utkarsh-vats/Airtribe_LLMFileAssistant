@@ -1,0 +1,27 @@
+KENJI TANAKA
+Staff Machine Learning Engineer
+Tokyo, Japan | kenji.tanaka@example.com | +81 555-0108
+
+SUMMARY
+ML engineer with 10 years of experience taking computer-vision and ranking models from research to low-latency production on Kubernetes.
+
+SKILLS
+Languages: python, C++, SQL
+ML: PyTorch, TensorFlow, ONNX, CUDA
+MLOps: Kubernetes, Kubeflow, MLflow, Triton Inference Server
+Data: Apache Spark, Parquet
+
+EXPERIENCE
+Staff ML Engineer - Sakura Vision, Tokyo (2022 - Present)
+  - Lead a team of 6 deploying real-time image models on Kubernetes with Triton Inference Server.
+  - Cut GPU serving cost by 35% through ONNX export and INT8 quantisation.
+
+ML Engineer - Shibuya Ads, Tokyo (2018 - 2022)
+  - Built a CTR-prediction training pipeline on Spark and Kubeflow.
+  - Wrote internal python libraries for feature validation.
+
+Software Engineer - Kanda Systems, Yokohama (2016 - 2018)
+  - Developed C++ image-processing modules for factory inspection cameras.
+
+EDUCATION
+- M.Eng. Information Science, Kanto Institute of Technology, 2016

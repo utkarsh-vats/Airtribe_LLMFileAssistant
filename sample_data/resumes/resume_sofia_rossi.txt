@@ -1,0 +1,23 @@
+SOFIA ROSSI
+Data Analyst (SQL / R)
+Milan, Italy | sofia.rossi@example.com | +39 555-0107
+
+SUMMARY
+Data analyst with 2 years of experience turning sales and marketing data into dashboards and recommendations.
+
+SKILLS
+Languages: SQL, R
+R packages: tidyverse, ggplot2, dplyr
+BI & Tools: BigQuery, Looker, Power BI, Excel
+
+EXPERIENCE
+Data Analyst - Navigli Commerce, Milan (2025 - Present)
+  - Built SQL models in BigQuery feeding weekly sales dashboards in Looker.
+  - Ran cohort analyses in R that informed a loyalty programme redesign.
+
+Junior Analyst - Duomo Marketing, Milan (2024 - 2025)
+  - Cleaned and merged campaign data from 6 advertising platforms.
+  - Produced monthly ggplot2 reports for clients.
+
+EDUCATION
+- B.Sc. Statistics and Economics, Universita di Lombardia, 2024

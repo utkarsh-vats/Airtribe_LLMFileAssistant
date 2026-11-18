@@ -1,0 +1,12 @@
+René Lefèvre — Product Manager
+Lyon, France | rene.lefevre@example.com | +33 555-0109
+
+SUMMARY
+Product manager with 4 years’ experience in B2B SaaS and café POS systems.
+
+SKILLS
+Roadmapping, user research, SQL, Figma
+
+EXPERIENCE
+Product Manager — Rhône Software (2022 - Present)
+  - Launched a self-serve onboarding flow that cut time-to-value by 30%.
