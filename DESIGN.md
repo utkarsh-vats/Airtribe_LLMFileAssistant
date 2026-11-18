@@ -103,12 +103,28 @@ Error codes (stable strings, safe to show to the LLM):
 | `PERMISSION_DENIED` | OS-level permission error |
 | `IO_ERROR` | Other `OSError` |
 | `INTERNAL_ERROR` | Unexpected exception; generic message, details only in the log |
+| `UNKNOWN_TOOL` | Dispatcher: the LLM called a tool name that isn't registered (message lists valid names) |
 
-**Dispatcher contract.** The tool registry wraps every tool call: an `FsToolError` becomes
-`{"success": False, "data": None, "error": {...}}`; any other unexpected exception becomes
-`INTERNAL_ERROR` with a generic message (details are logged, not sent). `list_files`' list is wrapped
-as `{"success": True, "data": [...], "error": None}` so the LLM sees one uniform shape for every
-tool and **never sees a traceback**.
+**Dispatcher contract** (`assistant/registry.py`). `dispatch(name, args)` never raises and always
+returns the envelope, so the LLM sees one uniform shape for every tool and **never sees a
+traceback**:
+
+- Unknown tool name → `UNKNOWN_TOOL`. Arguments are checked against the tool's schema first:
+  non-object args, a missing required arg, an unknown arg name or a wrong JSON type →
+  `INVALID_ARGUMENT` naming the argument. `null` args are treated as omitted (`None` args as `{}`).
+- An `FsToolError` becomes `{"success": False, "data": None, "error": {...}}`; any other
+  unexpected exception becomes `INTERNAL_ERROR` with a generic message (details logged at debug
+  level, not sent).
+- `list_files`' list is wrapped as `{"success": True, "data": {"files": [...], "count": n}, ...}`.
+- Context guard: `read_file` content longer than 20,000 characters is truncated, with a warning
+  and `metadata.content_truncated: true` (otherwise `false`).
+- Every result is checked to be JSON-serialisable before it is returned.
+
+Tool schemas are hand-written in the JSON Schema subset Gemini, Anthropic and OpenAI all accept
+(`type`, `properties`, `required`, per-property `type`/`description`/`enum`); a test keeps them in
+sync with the function signatures. Their descriptions carry the guidance the LLM needs (relative
+forward-slash paths, call `list_files` first, `whole_word` for ambiguous terms, one search per file
+in parallel).
 
 ## 3. Path sandbox
 
