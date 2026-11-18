@@ -12,8 +12,8 @@ Vertical slices; each one leaves `ruff check .`, `ruff format --check .` (and, f
       `read_file` for TXT/PDF/DOCX + tests; add `pytest` to CI.
 - [x] **4. list_files** + tests.
 - [x] **5. write_file** (atomic, text-only, parent dirs, `overwritten` flag) + tests.
-- [ ] **6. search_in_file** (shared extraction, case-insensitive, positions + context) + tests.
-- [ ] **7. Tool registry** – JSON schemas + dispatcher (exceptions → envelope) + tests.
+- [x] **6. search_in_file** (shared extraction, case-insensitive, positions + context) + tests.
+- [x] **7. Tool registry** – JSON schemas + dispatcher (exceptions → envelope) + tests.
 - [ ] **8. Providers** – `LLMProvider` ABC + provider registry + Gemini provider (AFC disabled) +
       `FakeProvider`.
 - [ ] **9. Agent loop** + tests with `FakeProvider` (multi-call turns, errors, iteration cap).
