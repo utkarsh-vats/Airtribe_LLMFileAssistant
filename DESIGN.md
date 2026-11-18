@@ -66,7 +66,7 @@ Representative `data` payloads:
 
 | Tool | `data` |
 |---|---|
-| `read_file` | `{"path", "format", "content", "metadata": {"size_bytes", "modified", "pages"?, "encoding"?, "char_count"}}` |
+| `read_file` | `{"content", "metadata": {"path", "name", "extension", "size_bytes", "modified", "char_count", "word_count", "page_count"?, "encoding"?, "warnings"}}` – `page_count` for PDF only, `encoding` for TXT/MD only; `modified` is ISO 8601 UTC |
 | `write_file` | `{"path", "bytes_written", "overwritten": bool}` |
 | `search_in_file` | `{"path", "keyword", "match_count", "matches": [{"position", "line", "context"}]}` |
 
@@ -83,12 +83,15 @@ Error codes (stable strings, safe to show to the LLM):
 |---|---|
 | `INVALID_ARGUMENT` | Empty/ill-typed argument (e.g. empty keyword) |
 | `PATH_OUTSIDE_WORKSPACE` | Path escapes the sandbox |
-| `NOT_FOUND` | File or directory does not exist |
+| `FILE_NOT_FOUND` | File does not exist |
+| `NOT_FOUND` | Directory does not exist (`list_files`) |
 | `NOT_A_FILE` / `NOT_A_DIRECTORY` | Wrong kind of path |
 | `UNSUPPORTED_FORMAT` | Extension not supported for this operation |
+| `FILE_TOO_LARGE` | File exceeds the read cap (10 MB), checked before reading |
 | `EXTRACTION_FAILED` | Corrupt/unreadable PDF or DOCX |
 | `PERMISSION_DENIED` | OS-level permission error |
 | `IO_ERROR` | Other `OSError` |
+| `INTERNAL_ERROR` | Unexpected exception; generic message, details only in the log |
 
 **Dispatcher contract.** The tool registry wraps every tool call: an `FsToolError` becomes
 `{"success": False, "data": None, "error": {...}}`; any other unexpected exception becomes
@@ -101,14 +104,17 @@ tool and **never sees a traceback**.
 LLM-supplied paths are **untrusted input**. Every tool resolves its path through one helper:
 
 1. Reject empty paths and paths containing NUL bytes.
-2. `root = Path(WORKSPACE_ROOT).resolve()` (read from env, default `./sample_data`).
+2. `root = Path(WORKSPACE_ROOT).resolve()` (read from env on every call, default `./sample_data`,
+   so tests can monkeypatch it).
 3. If the given path is absolute, use it as-is; otherwise join it onto `root`.
 4. `candidate = path.resolve()` – this collapses `..` **and follows symlinks**.
 5. Require `candidate.is_relative_to(root)`; otherwise raise `PATH_OUTSIDE_WORKSPACE`.
 
 This single post-resolution check covers `../` traversal, absolute paths outside the root, and
 symlinks (or Windows junctions) that point outside. An absolute path that lands *inside* the root is
-allowed. Error messages report the path as given and never reveal the absolute host path. For
+allowed. Paths returned to callers are workspace-relative with forward slashes (`as_posix()`), so
+output is identical on Windows and Linux. Error messages report the path as given and never reveal
+the absolute host path. For
 `write_file`, the check runs on the target before any parent directories are created.
 
 ## 4. Text extraction and search
@@ -117,11 +123,15 @@ One internal `extract_text(path) -> (text, metadata)` dispatches on extension:
 
 | Format | Method |
 |---|---|
-| `.txt` (also `.md` for read-back) | Decode UTF-8 (`utf-8-sig` to drop a BOM); on `UnicodeDecodeError`, fall back to `cp1252`, then `latin-1`. The encoding used is reported in metadata. |
-| `.pdf` | `pypdf.PdfReader`; text of each page joined with newlines; `pages` in metadata. Encrypted or malformed files → `EXTRACTION_FAILED`. |
-| `.docx` | `python-docx`: paragraphs in order, then table cells (row cells joined by ` \| `), so skills listed in tables are searchable. Invalid zip/XML → `EXTRACTION_FAILED`. |
+| `.txt` (also `.md` for read-back) | Decode UTF-8 (a leading BOM is stripped); on `UnicodeDecodeError`, fall back to `cp1252`, then `latin-1`. The encoding used is reported in metadata. |
+| `.pdf` | `pypdf.PdfReader`; page texts joined with `"\n\f\n"` (form feed, as `pdftotext` does); `page_count` in metadata. Reader construction *and* page access share one error mapping, since pypdf may only log on open and raise later. Encrypted or malformed files → `EXTRACTION_FAILED`. |
+| `.docx` | `python-docx`: paragraphs and tables in document order (`iter_inner_content()`); each table row's cells joined by ` \| ` (merged cells once), so skills listed in tables are searchable. Invalid zip/XML → `EXTRACTION_FAILED`. |
 
-Anything else → `UNSUPPORTED_FORMAT`. An empty file is a success with empty `content` (not an error).
+Extensions match case-insensitively. Anything else → `UNSUPPORTED_FORMAT`. Files over 10 MB →
+`FILE_TOO_LARGE`, checked via `stat` before reading. Extraction error messages name only the
+exception type – never a traceback or host path. An empty file, or a PDF/DOCX with no extractable
+text, is a **success** with empty `content` and a `warnings` entry (e.g. "possibly a scanned/image
+PDF"), not an error.
 
 **`search_in_file`** calls the same extraction as `read_file`, so it works identically across all
 three formats. Matching is case-insensitive (`casefold`) on a literal keyword (no regex, so the LLM

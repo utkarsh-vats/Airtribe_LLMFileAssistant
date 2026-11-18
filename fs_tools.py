@@ -8,6 +8,234 @@ Exposes four tools intended to be called by an LLM via function calling:
 - ``search_in_file(filepath, keyword) -> dict``
 
 All paths are resolved inside ``WORKSPACE_ROOT``. See DESIGN.md for the
-result envelope, error codes and sandbox rules. Implementations land in
-later steps of project-plan.md.
+result envelope, error codes and sandbox rules. ``read_file`` is implemented;
+the other tools land in later steps of project-plan.md.
 """
+
+import logging
+import os
+from datetime import UTC, datetime
+from enum import StrEnum
+from pathlib import Path
+from typing import Any
+
+import docx
+from docx.table import Table
+from pypdf import PdfReader
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_WORKSPACE_ROOT = "./sample_data"
+MAX_READ_BYTES = 10 * 1024 * 1024  # 10 MB
+TEXT_EXTENSIONS = frozenset({".txt", ".md"})
+READ_EXTENSIONS = TEXT_EXTENSIONS | {".pdf", ".docx"}
+TEXT_ENCODINGS = ("utf-8", "cp1252", "latin-1")  # latin-1 decodes any byte sequence
+PDF_PAGE_SEPARATOR = "\n\f\n"  # form feed between pages, as pdftotext does
+
+
+class ErrorCode(StrEnum):
+    INVALID_ARGUMENT = "INVALID_ARGUMENT"
+    PATH_OUTSIDE_WORKSPACE = "PATH_OUTSIDE_WORKSPACE"
+    FILE_NOT_FOUND = "FILE_NOT_FOUND"
+    NOT_FOUND = "NOT_FOUND"
+    NOT_A_FILE = "NOT_A_FILE"
+    NOT_A_DIRECTORY = "NOT_A_DIRECTORY"
+    UNSUPPORTED_FORMAT = "UNSUPPORTED_FORMAT"
+    FILE_TOO_LARGE = "FILE_TOO_LARGE"
+    EXTRACTION_FAILED = "EXTRACTION_FAILED"
+    PERMISSION_DENIED = "PERMISSION_DENIED"
+    IO_ERROR = "IO_ERROR"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
+
+
+class FsToolError(Exception):
+    """A tool failure with a stable error code and a message that is safe to show the LLM."""
+
+    def __init__(self, code: ErrorCode, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
+
+
+# --- Envelope -----------------------------------------------------------------------------
+
+
+def _ok(data: Any) -> dict:
+    return {"success": True, "data": data, "error": None}
+
+
+def _err(code: ErrorCode | str, message: str) -> dict:
+    return {"success": False, "data": None, "error": {"code": str(code), "message": message}}
+
+
+# --- Sandbox ------------------------------------------------------------------------------
+
+
+def _workspace_root() -> Path:
+    """Absolute workspace root, read from the environment on every call."""
+    return Path(os.environ.get("WORKSPACE_ROOT") or DEFAULT_WORKSPACE_ROOT).resolve()
+
+
+def _resolve_path(user_path: str) -> Path:
+    """Resolve an untrusted path to an absolute path inside the workspace root.
+
+    Symlinks and ``..`` are resolved *before* the containment check, so traversal, absolute
+    paths outside the root and symlink escapes are all rejected the same way.
+    """
+    if not isinstance(user_path, str) or not user_path.strip():
+        raise FsToolError(ErrorCode.INVALID_ARGUMENT, "Path must be a non-empty string.")
+    if "\x00" in user_path:
+        raise FsToolError(ErrorCode.INVALID_ARGUMENT, "Path must not contain NUL bytes.")
+
+    root = _workspace_root()
+    candidate = Path(user_path)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    resolved = candidate.resolve(strict=False)
+    if not resolved.is_relative_to(root):
+        raise FsToolError(
+            ErrorCode.PATH_OUTSIDE_WORKSPACE, f"Path '{user_path}' is outside the workspace."
+        )
+    return resolved
+
+
+def _display_path(path: Path) -> str:
+    """Workspace-relative path with forward slashes, identical on Windows and Linux."""
+    relative = path.relative_to(_workspace_root()).as_posix()
+    return relative if relative != "." else ""
+
+
+def _os_error(exc: OSError, display: str) -> FsToolError:
+    if isinstance(exc, PermissionError):
+        return FsToolError(ErrorCode.PERMISSION_DENIED, f"Permission denied: '{display}'.")
+    return FsToolError(ErrorCode.IO_ERROR, f"I/O error accessing '{display}'.")
+
+
+# --- Text extraction ----------------------------------------------------------------------
+
+
+def _extract_text_file(path: Path) -> tuple[str, dict]:
+    raw = path.read_bytes()
+    for encoding in TEXT_ENCODINGS:
+        try:
+            text = raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        return text.removeprefix("\ufeff"), {"encoding": encoding}
+    raise AssertionError("unreachable: latin-1 decodes any byte sequence")
+
+
+def _extract_pdf(path: Path) -> tuple[str, dict]:
+    # pypdf may only log on open for some corrupt files and raise later, on page access,
+    # so construction and extraction share one error mapping.
+    try:
+        reader = PdfReader(path)
+        pages = [page.extract_text() or "" for page in reader.pages]
+    except Exception as exc:
+        raise FsToolError(
+            ErrorCode.EXTRACTION_FAILED,
+            f"Could not extract text from PDF ({type(exc).__name__}); "
+            "the file may be corrupt or encrypted.",
+        ) from exc
+    return PDF_PAGE_SEPARATOR.join(pages), {"page_count": len(pages)}
+
+
+def _table_lines(table: Table) -> list[str]:
+    lines = []
+    for row in table.rows:
+        cells, seen = [], set()
+        for cell in row.cells:  # merged cells repeat; keep each one once
+            if id(cell._tc) not in seen:
+                seen.add(id(cell._tc))
+                cells.append(cell.text.strip())
+        lines.append(" | ".join(cells))
+    return lines
+
+
+def _extract_docx(path: Path) -> tuple[str, dict]:
+    try:
+        document = docx.Document(str(path))
+        lines = []
+        for block in document.iter_inner_content():  # paragraphs and tables in document order
+            if isinstance(block, Table):
+                lines.extend(_table_lines(block))
+            else:
+                lines.append(block.text)
+    except Exception as exc:
+        raise FsToolError(
+            ErrorCode.EXTRACTION_FAILED,
+            f"Could not extract text from DOCX ({type(exc).__name__}); the file may be corrupt.",
+        ) from exc
+    return "\n".join(lines), {}
+
+
+def _extract_text(path: Path) -> tuple[str, dict]:
+    """Return ``(text, format-specific metadata)`` for a supported file."""
+    extension = path.suffix.lower()
+    if extension in TEXT_EXTENSIONS:
+        return _extract_text_file(path)
+    if extension == ".pdf":
+        return _extract_pdf(path)
+    return _extract_docx(path)
+
+
+def _empty_text_warning(extension: str) -> str:
+    if extension == ".pdf":
+        return "No extractable text - possibly a scanned/image PDF."
+    if extension == ".docx":
+        return "Document contains no text."
+    return "File is empty."
+
+
+# --- Tools --------------------------------------------------------------------------------
+
+
+def read_file(filepath: str) -> dict:
+    """Read a resume (.txt, .md, .pdf, .docx) and return its text plus metadata.
+
+    Never raises: every failure is returned as an error envelope.
+    """
+    try:
+        path = _resolve_path(filepath)
+        display = _display_path(path)
+        extension = path.suffix.lower()
+        try:
+            if not path.exists():
+                raise FsToolError(ErrorCode.FILE_NOT_FOUND, f"File '{display}' does not exist.")
+            if not path.is_file():
+                raise FsToolError(ErrorCode.NOT_A_FILE, f"'{display}' is not a regular file.")
+            if extension not in READ_EXTENSIONS:
+                supported = ", ".join(sorted(READ_EXTENSIONS))
+                raise FsToolError(
+                    ErrorCode.UNSUPPORTED_FORMAT,
+                    f"Unsupported file type '{path.suffix}'. Supported: {supported}.",
+                )
+            stat = path.stat()
+            if stat.st_size > MAX_READ_BYTES:
+                raise FsToolError(
+                    ErrorCode.FILE_TOO_LARGE,
+                    f"File '{display}' is {stat.st_size} bytes; the limit is "
+                    f"{MAX_READ_BYTES} bytes.",
+                )
+            content, format_metadata = _extract_text(path)
+        except OSError as exc:
+            raise _os_error(exc, display) from exc
+
+        warnings = [] if content.strip() else [_empty_text_warning(extension)]
+        metadata = {
+            "path": display,
+            "name": path.name,
+            "extension": extension,
+            "size_bytes": stat.st_size,
+            "modified": datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
+            "char_count": len(content),
+            "word_count": len(content.split()),
+            **format_metadata,
+            "warnings": warnings,
+        }
+        return _ok({"content": content, "metadata": metadata})
+    except FsToolError as exc:
+        return _err(exc.code, exc.message)
+    except Exception:
+        logger.exception("read_file failed unexpectedly")
+        return _err(ErrorCode.INTERNAL_ERROR, "Unexpected internal error while reading the file.")
