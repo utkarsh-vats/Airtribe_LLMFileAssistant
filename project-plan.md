@@ -14,8 +14,8 @@ Vertical slices; each one leaves `ruff check .`, `ruff format --check .` (and, f
 - [x] **5. write_file** (atomic, text-only, parent dirs, `overwritten` flag) + tests.
 - [x] **6. search_in_file** (shared extraction, case-insensitive, positions + context) + tests.
 - [x] **7. Tool registry** – JSON schemas + dispatcher (exceptions → envelope) + tests.
-- [ ] **8. Providers** – `LLMProvider` ABC + provider registry + Gemini provider (AFC disabled) +
-      `FakeProvider`.
+- [x] **8a. Provider abstraction + lazy registry + FakeProvider**
+- [x] **8b. Gemini provider (manual function calling, error mapping, retries)**
 - [ ] **9. Agent loop** + tests with `FakeProvider` (multi-call turns, errors, iteration cap).
 - [ ] **10. CLI** – REPL, `--query`, rich tool-call trace.
 - [ ] **11. README + demo** – setup, usage, architecture, example queries, demo script.
