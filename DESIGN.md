@@ -251,11 +251,41 @@ deterministic ids `call_1`, `call_2`, ... per instance. An exhausted script rais
 `LLMProviderError`. It drives every agent-loop test (no network, no API key) and can run an
 offline demo of the CLI.
 
-**Gemini first** via `google-genai`. Tools are passed as `FunctionDeclaration`s built from the
-registry's JSON schemas. **Automatic function calling is disabled**
-(`AutomaticFunctionCallingConfig(disable=True)`) so the SDK never executes Python functions on its
-own – the loop below is ours, which keeps the sandbox, logging and iteration cap under our control
-and makes the flow visible for the assignment.
+**Gemini** (`assistant/providers/gemini.py`, `google-genai` 3.5). `GeminiProvider(api_key=None,
+model=None, client=None, max_retries=2, sleep=time.sleep)` falls back to `GEMINI_API_KEY` /
+`GEMINI_MODEL` from `os.environ` (loading `.env` is the CLI's job); a missing value raises
+`LLMProviderError` naming the variable, never echoing the key. `client` and `sleep` are injectable
+so tests need no network and no real waiting.
+
+- **Config per call**: `system_instruction`, one `types.Tool` whose `FunctionDeclaration`s take the
+  registry schemas verbatim via `parameters_json_schema` (no `types.Schema` conversion),
+  `ToolConfig(function_calling_config=FunctionCallingConfig(mode=AUTO))`, and
+  **automatic function calling disabled** (`AutomaticFunctionCallingConfig(disable=True)`), so the
+  SDK never runs Python functions itself – the loop below is ours, which keeps the sandbox, logging
+  and iteration cap under our control and makes the flow visible. Temperature is left at the
+  model default (Gemini 3 guidance).
+- **History → `types.Content`**: `user` → role `"user"` text part. `assistant` with a
+  `types.Content` in `provider_state` → that object, **unchanged** (it carries the thought
+  signatures); without it → role `"model"` with text and `function_call` parts. `tool` → one
+  role-`"user"` Content (the role google-genai's own chat code uses) with one `function_response`
+  part per result: `name`, `response` = the envelope, and `id`.
+- **Response → `LLMResponse`**: `function_call` parts of the first candidate become `ToolCall`s
+  (`id` from Gemini, else a positional `gemini_call_<n>` – such synthetic ids are never sent back);
+  `text` joins the non-thought text parts; `provider_state` is the candidate's raw `Content`;
+  `usage` has `prompt_tokens`, `candidates_tokens`, `thoughts_tokens`, `total_tokens` when present.
+
+| Failure | `LLMProviderError` |
+|---|---|
+| `prompt_feedback.block_reason`, no candidates, finish `SAFETY` / `RECITATION` / `BLOCKLIST` / `PROHIBITED_CONTENT` / `SPII` / `MODEL_ARMOR` / `MISSING_THOUGHT_SIGNATURE` (and image variants) | not retryable, names the reason |
+| finish `MALFORMED_FUNCTION_CALL` / `MALFORMED_RESPONSE`, or an empty response | retryable |
+| `errors.APIError` 408, 429, 5xx | retryable |
+| `errors.APIError` 400 / 401 / 403 / 404 (other 4xx) | not retryable; status code + hint (401/403 → check `GEMINI_API_KEY`, 404 → check `GEMINI_MODEL`); the API message is included only with the key redacted |
+| `httpx2.TransportError` (google-genai's HTTP stack), `ConnectionError`, `TimeoutError` | retryable |
+| anything else from the SDK | not retryable, exception type only |
+
+Retryable errors are retried up to `max_retries` times with exponential backoff (1 s, 2 s) through
+the injected `sleep`; then the last error is raised. The SDK's own retries stay off (no
+`HttpRetryOptions`, so it makes a single attempt), so the two never multiply.
 
 **Agent loop** (`assistant/agent.py`):
 

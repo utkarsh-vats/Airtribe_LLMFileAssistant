@@ -63,13 +63,13 @@ def test_importing_providers_does_not_import_google_genai() -> None:
     assert result.stdout.strip() == "False"
 
 
-def test_unimplemented_gemini_raises_provider_error_not_import_error() -> None:
-    # Placeholder until step 8b adds assistant/providers/gemini.py.
-    with pytest.raises(LLMProviderError) as excinfo:
-        get_provider("gemini")
+def test_get_provider_gemini_with_injected_client() -> None:
+    from assistant.providers.gemini import GeminiProvider
 
-    assert not isinstance(excinfo.value, ImportError)
-    assert "gemini" in excinfo.value.message
+    provider = get_provider("gemini", api_key="test", model="test-model", client=object())
+
+    assert isinstance(provider, GeminiProvider)
+    assert provider.name == "gemini"
 
 
 # --- FakeProvider -------------------------------------------------------------------------
