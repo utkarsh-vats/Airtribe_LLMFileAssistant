@@ -138,6 +138,10 @@ One internal `extract_text(path) -> (text, metadata)` dispatches on extension:
 | `.pdf` | `pypdf.PdfReader`; page texts joined with `"\n\f\n"` (form feed, as `pdftotext` does); `page_count` in metadata. Reader construction *and* page access share one error mapping, since pypdf may only log on open and raise later. Encrypted or malformed files → `EXTRACTION_FAILED`. |
 | `.docx` | `python-docx`: paragraphs and tables in document order (`iter_inner_content()`); each table row's cells joined by ` \| ` (merged cells once), so skills listed in tables are searchable. Invalid zip/XML → `EXTRACTION_FAILED`. |
 
+For every format the extracted text is then sanitised: `\r\n` and lone `\r` become `\n`, and every
+other Unicode control character (Cc) except `\n`, `\t` and `\f` becomes one space (1:1, before any
+offsets are computed – e.g. the DEL pypdf extracts for bullet glyphs).
+
 Extensions match case-insensitively. Anything else → `UNSUPPORTED_FORMAT`. Files over 10 MB →
 `FILE_TOO_LARGE`, checked via `stat` before reading. Extraction error messages name only the
 exception type – never a traceback or host path. An empty file, or a PDF/DOCX with no extractable

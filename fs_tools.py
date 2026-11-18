@@ -39,6 +39,8 @@ READ_EXTENSIONS = TEXT_EXTENSIONS | {".pdf", ".docx"}
 TEXT_ENCODINGS = ("utf-8", "cp1252", "latin-1")  # latin-1 decodes any byte sequence
 PDF_PAGE_SEPARATOR = "\n\f\n"  # form feed between pages, as pdftotext does
 _PLAIN_EXTENSION = re.compile(r"\.[a-z0-9_-]+")
+# Unicode Cc control characters except \t (0x09), \n (0x0A) and \f (0x0C, the PDF page separator).
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0d-\x1f\x7f-\x9f]")
 
 
 class ErrorCode(StrEnum):
@@ -192,6 +194,16 @@ def _extract_text(path: Path) -> tuple[str, dict]:
     return _extract_docx(path)
 
 
+def _sanitise_text(text: str) -> str:
+    """Normalise line endings to "\\n", then replace control characters 1:1 with spaces.
+
+    Runs before any offsets are computed. Keeps "\\n", "\\t" and "\\f"; removes e.g. the DEL
+    pypdf extracts for some bullet glyphs.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return _CONTROL_CHARS.sub(" ", text)
+
+
 def _empty_text_warning(extension: str) -> str:
     if extension == ".pdf":
         return "No extractable text - possibly a scanned/image PDF."
@@ -230,6 +242,7 @@ def _load_document(filepath: str) -> tuple[str, dict]:
     except OSError as exc:
         raise _os_error(exc, display) from exc
 
+    content = _sanitise_text(content)
     warnings = [] if content.strip() else [_empty_text_warning(extension)]
     metadata = {
         "path": display,
@@ -458,8 +471,8 @@ def _validate_keyword(keyword: str, whole_word: bool) -> str:
 def _match_context(content: str, start: int, end: int) -> str:
     """About SEARCH_CONTEXT_CHARS either side, whitespace collapsed, ellipsis where cut.
 
-    Non-printable characters (form-feed page separators, or the DEL that pypdf extracts for
-    some bullet glyphs) become spaces before collapsing.
+    Control characters are already spaces (``_sanitise_text``), but invisible format characters
+    such as zero-width spaces and soft hyphens are not, so non-printables become spaces here too.
     """
     lo = max(0, start - SEARCH_CONTEXT_CHARS)
     hi = min(len(content), end + SEARCH_CONTEXT_CHARS)

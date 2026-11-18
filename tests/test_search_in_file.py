@@ -132,7 +132,7 @@ def test_context_collapses_whitespace_and_newlines(workspace: Path) -> None:
 
 
 def test_context_replaces_control_characters(workspace: Path) -> None:
-    # pypdf extracts some bullet glyphs as DEL (0x7F); zero-width spaces are invisible noise too.
+    # DEL (0x7F) is sanitised at extraction; the zero-width space is handled by the context builder.
     _write(workspace, "cv.txt", f"Skills\n {chr(0x7F)} Python,{chr(0x200B)}SQL\f next")
 
     context = _search("cv.txt", "python")["matches"][0]["context"]

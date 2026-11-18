@@ -64,8 +64,56 @@ def test_falls_back_to_latin1_when_cp1252_fails(workspace: Path) -> None:
 
     data = assert_ok(read_file("latin1.txt"))
 
-    assert data["content"] == raw.decode("latin-1")
+    # latin-1 decodes 0x81 to U+0081, a C1 control character, which is sanitised to a space.
+    assert data["content"] == raw.decode("latin-1").replace(chr(0x81), " ")
+    assert data["content"].endswith(chr(0xE9))
     assert data["metadata"]["encoding"] == "latin-1"
+
+
+# --- Sanitising ---------------------------------------------------------------------------
+
+
+def test_control_characters_become_spaces_one_to_one(workspace: Path) -> None:
+    raw = b"a\x7fb\x00c\x1bd\x0be" + chr(0x85).encode("utf-8") + b"f"
+    (workspace / "ctrl.txt").write_bytes(raw)
+
+    data = assert_ok(read_file("ctrl.txt"))
+
+    assert data["content"] == "a b c d e f"
+    assert data["metadata"]["char_count"] == len("a b c d e f")
+
+
+def test_line_endings_are_normalised_to_lf(workspace: Path) -> None:
+    (workspace / "crlf.txt").write_bytes(b"one\r\ntwo\rthree\nfour\r\n\r\nfive")
+
+    data = assert_ok(read_file("crlf.txt"))
+
+    assert data["content"] == "one\ntwo\nthree\nfour\n\nfive"
+
+
+def test_tab_newline_and_form_feed_survive(workspace: Path) -> None:
+    (workspace / "keep.txt").write_bytes(b"a\tb\nc\fd")
+
+    assert assert_ok(read_file("keep.txt"))["content"] == "a\tb\nc\fd"
+
+
+def test_pdf_bullet_glyph_is_not_extracted_as_del(make_pdf: Callable[..., Path]) -> None:
+    # pypdf extracts reportlab's standard-font bullet as DEL (0x7F).
+    make_pdf("bullets.pdf", [[f"{chr(0x2022)} Python", f"{chr(0x2022)} SQL"]])
+
+    content = assert_ok(read_file("bullets.pdf"))["content"]
+
+    assert chr(0x7F) not in content
+    assert "Python" in content and "SQL" in content
+
+
+def test_docx_control_characters_are_sanitised(make_docx: Callable[..., Path]) -> None:
+    make_docx("ctrl.docx", before=["Tab\there", "Line\rbreak"])
+
+    content = assert_ok(read_file("ctrl.docx"))["content"]
+
+    assert "\r" not in content
+    assert "Tab\there" in content
 
 
 def test_empty_file_is_success_with_warning(workspace: Path) -> None:
