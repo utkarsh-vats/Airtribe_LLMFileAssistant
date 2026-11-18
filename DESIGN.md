@@ -44,8 +44,11 @@ Exactly as the assignment brief specifies:
 def read_file(filepath: str) -> dict: ...
 def list_files(directory: str, extension: str | None = None) -> list: ...
 def write_file(filepath: str, content: str) -> dict: ...
-def search_in_file(filepath: str, keyword: str) -> dict: ...
+def search_in_file(filepath: str, keyword: str, whole_word: bool = False) -> dict: ...
 ```
+
+`search_in_file` adds one optional `whole_word` flag; calling it with the brief's two arguments
+behaves exactly as specified.
 
 Paths are strings relative to `WORKSPACE_ROOT` (see §3). `extension` accepts `"pdf"` or `".pdf"`,
 case-insensitive.
@@ -68,7 +71,7 @@ Representative `data` payloads:
 |---|---|
 | `read_file` | `{"content", "metadata": {"path", "name", "extension", "size_bytes", "modified", "char_count", "word_count", "page_count"?, "encoding"?, "warnings"}}` – `page_count` for PDF only, `encoding` for TXT/MD only; `modified` is ISO 8601 UTC |
 | `write_file` | `{"path", "name", "size_bytes", "overwritten": bool, "created_dirs": [str], "modified"}` – `created_dirs` lists the workspace-relative directories it created |
-| `search_in_file` | `{"path", "keyword", "match_count", "matches": [{"position", "line", "context"}]}` |
+| `search_in_file` | `{"path", "keyword", "whole_word", "found", "total_matches", "returned_matches", "truncated", "matches": [{"start", "end", "matched_text", "line_number", "page", "context"}], "warnings"}` – `page` is `null` except for PDFs |
 
 **`list_files`** returns a `list` per spec – one dict per file:
 `{"name", "path", "extension", "size_bytes", "modified", "supported"}` (`extension` lowercase with
@@ -141,11 +144,25 @@ exception type – never a traceback or host path. An empty file, or a PDF/DOCX 
 text, is a **success** with empty `content` and a `warnings` entry (e.g. "possibly a scanned/image
 PDF"), not an error.
 
-**`search_in_file`** calls the same extraction as `read_file`, so it works identically across all
-three formats. Matching is case-insensitive (`casefold`) on a literal keyword (no regex, so the LLM
-can't inject patterns). Each match returns its character `position` in the extracted text, the
-1-based `line`, and a `context` snippet of roughly ±60 characters, whitespace-collapsed. Matches are
-capped (e.g. 50) with a `truncated` flag to keep tool responses small.
+**`search_in_file`** calls the same `_load_document` helper as `read_file`, so it works identically
+across all formats (including DOCX table text) and fails with exactly the envelope `read_file` would
+return (`FILE_NOT_FOUND`, `UNSUPPORTED_FORMAT`, `EXTRACTION_FAILED`, ...). Extraction warnings (e.g.
+a no-text PDF) are passed through; an empty document or no hits is a success with `found: false`.
+
+- **Keyword**: a non-empty `str` after stripping, at most 200 characters, else `INVALID_ARGUMENT`.
+  It is matched literally (`re.escape`, so `C++`, `node.js` and `(a)` are not patterns – the LLM
+  can't inject regexes) and case-insensitively with `re.IGNORECASE` on the original text. Lowering
+  or casefolding the text first is avoided because it can change string length and shift offsets.
+- **`whole_word=True`** adds `\b` only on a side where the keyword starts/ends with a word
+  character, so `Java` no longer matches `JavaScript` while `C++` and `.NET` still match.
+- **Each match**: `start`/`end` character offsets into the extracted content (so
+  `content[start:end] == matched_text`, with the document's original casing), 1-based
+  `line_number`, 1-based `page` for PDFs (counted from the form-feed page separators; `null`
+  otherwise), and `context` – ±60 characters around the match with non-printable characters (form
+  feeds, the DEL pypdf extracts for some bullet glyphs) turned into spaces, all whitespace
+  collapsed to single spaces, and `…` where the snippet was cut.
+- **Cap**: at most 50 matches are returned, but every match is counted: `total_matches`,
+  `returned_matches` and `truncated` tell the LLM when it is seeing a subset.
 
 ## 5. `write_file`
 

@@ -5,11 +5,10 @@ Exposes four tools intended to be called by an LLM via function calling:
 - ``read_file(filepath) -> dict``
 - ``list_files(directory, extension=None) -> list``
 - ``write_file(filepath, content) -> dict``
-- ``search_in_file(filepath, keyword) -> dict``
+- ``search_in_file(filepath, keyword, whole_word=False) -> dict``
 
 All paths are resolved inside ``WORKSPACE_ROOT``. See DESIGN.md for the
-result envelope, error codes and sandbox rules. ``search_in_file`` lands in
-a later step of project-plan.md.
+result envelope, error codes and sandbox rules.
 """
 
 import contextlib
@@ -31,6 +30,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_WORKSPACE_ROOT = "./sample_data"
 MAX_READ_BYTES = 10 * 1024 * 1024  # 10 MB
 MAX_WRITE_BYTES = 1024 * 1024  # 1 MB of UTF-8 encoded content
+MAX_SEARCH_MATCHES = 50  # matches returned; all are still counted
+MAX_KEYWORD_LENGTH = 200
+SEARCH_CONTEXT_CHARS = 60
+ELLIPSIS = "\N{HORIZONTAL ELLIPSIS}"
 TEXT_EXTENSIONS = frozenset({".txt", ".md"})
 READ_EXTENSIONS = TEXT_EXTENSIONS | {".pdf", ".docx"}
 TEXT_ENCODINGS = ("utf-8", "cp1252", "latin-1")  # latin-1 decodes any byte sequence
@@ -197,6 +200,51 @@ def _empty_text_warning(extension: str) -> str:
     return "File is empty."
 
 
+def _load_document(filepath: str) -> tuple[str, dict]:
+    """Resolve, validate and extract a readable file; return ``(content, metadata)``.
+
+    Shared by ``read_file`` and ``search_in_file`` so both fail identically. Raises
+    ``FsToolError``.
+    """
+    path = _resolve_path(filepath)
+    display = _display_path(path)
+    extension = path.suffix.lower()
+    try:
+        if not path.exists():
+            raise FsToolError(ErrorCode.FILE_NOT_FOUND, f"File '{display}' does not exist.")
+        if not path.is_file():
+            raise FsToolError(ErrorCode.NOT_A_FILE, f"'{display}' is not a regular file.")
+        if extension not in READ_EXTENSIONS:
+            supported = ", ".join(sorted(READ_EXTENSIONS))
+            raise FsToolError(
+                ErrorCode.UNSUPPORTED_FORMAT,
+                f"Unsupported file type '{path.suffix}'. Supported: {supported}.",
+            )
+        stat = path.stat()
+        if stat.st_size > MAX_READ_BYTES:
+            raise FsToolError(
+                ErrorCode.FILE_TOO_LARGE,
+                f"File '{display}' is {stat.st_size} bytes; the limit is {MAX_READ_BYTES} bytes.",
+            )
+        content, format_metadata = _extract_text(path)
+    except OSError as exc:
+        raise _os_error(exc, display) from exc
+
+    warnings = [] if content.strip() else [_empty_text_warning(extension)]
+    metadata = {
+        "path": display,
+        "name": path.name,
+        "extension": extension,
+        "size_bytes": stat.st_size,
+        "modified": _iso_utc(stat.st_mtime),
+        "char_count": len(content),
+        "word_count": len(content.split()),
+        **format_metadata,
+        "warnings": warnings,
+    }
+    return content, metadata
+
+
 # --- Tools --------------------------------------------------------------------------------
 
 
@@ -206,43 +254,7 @@ def read_file(filepath: str) -> dict:
     Never raises: every failure is returned as an error envelope.
     """
     try:
-        path = _resolve_path(filepath)
-        display = _display_path(path)
-        extension = path.suffix.lower()
-        try:
-            if not path.exists():
-                raise FsToolError(ErrorCode.FILE_NOT_FOUND, f"File '{display}' does not exist.")
-            if not path.is_file():
-                raise FsToolError(ErrorCode.NOT_A_FILE, f"'{display}' is not a regular file.")
-            if extension not in READ_EXTENSIONS:
-                supported = ", ".join(sorted(READ_EXTENSIONS))
-                raise FsToolError(
-                    ErrorCode.UNSUPPORTED_FORMAT,
-                    f"Unsupported file type '{path.suffix}'. Supported: {supported}.",
-                )
-            stat = path.stat()
-            if stat.st_size > MAX_READ_BYTES:
-                raise FsToolError(
-                    ErrorCode.FILE_TOO_LARGE,
-                    f"File '{display}' is {stat.st_size} bytes; the limit is "
-                    f"{MAX_READ_BYTES} bytes.",
-                )
-            content, format_metadata = _extract_text(path)
-        except OSError as exc:
-            raise _os_error(exc, display) from exc
-
-        warnings = [] if content.strip() else [_empty_text_warning(extension)]
-        metadata = {
-            "path": display,
-            "name": path.name,
-            "extension": extension,
-            "size_bytes": stat.st_size,
-            "modified": _iso_utc(stat.st_mtime),
-            "char_count": len(content),
-            "word_count": len(content.split()),
-            **format_metadata,
-            "warnings": warnings,
-        }
+        content, metadata = _load_document(filepath)
         return _ok({"content": content, "metadata": metadata})
     except FsToolError as exc:
         return _err(exc.code, exc.message)
@@ -415,3 +427,91 @@ def write_file(filepath: str, content: str) -> dict:
     except Exception:
         logger.exception("write_file failed unexpectedly")
         return _err(ErrorCode.INTERNAL_ERROR, "Unexpected internal error while writing the file.")
+
+
+def _keyword_pattern(keyword: str, whole_word: bool) -> re.Pattern[str]:
+    """Compile a literal, case-insensitive pattern for ``keyword`` (already stripped)."""
+    pattern = re.escape(keyword)
+    if whole_word:
+        # Only add \b on a side that is a word character, so "C++" or ".NET" still match.
+        if re.match(r"\w", keyword[0]):
+            pattern = rf"\b{pattern}"
+        if re.match(r"\w", keyword[-1]):
+            pattern = rf"{pattern}\b"
+    return re.compile(pattern, re.IGNORECASE)
+
+
+def _validate_keyword(keyword: str, whole_word: bool) -> str:
+    if not isinstance(keyword, str) or not keyword.strip():
+        raise FsToolError(ErrorCode.INVALID_ARGUMENT, "Keyword must be a non-empty string.")
+    keyword = keyword.strip()
+    if len(keyword) > MAX_KEYWORD_LENGTH:
+        raise FsToolError(
+            ErrorCode.INVALID_ARGUMENT,
+            f"Keyword is {len(keyword)} characters; the limit is {MAX_KEYWORD_LENGTH}.",
+        )
+    if not isinstance(whole_word, bool):
+        raise FsToolError(ErrorCode.INVALID_ARGUMENT, "whole_word must be a boolean.")
+    return keyword
+
+
+def _match_context(content: str, start: int, end: int) -> str:
+    """About SEARCH_CONTEXT_CHARS either side, whitespace collapsed, ellipsis where cut.
+
+    Non-printable characters (form-feed page separators, or the DEL that pypdf extracts for
+    some bullet glyphs) become spaces before collapsing.
+    """
+    lo = max(0, start - SEARCH_CONTEXT_CHARS)
+    hi = min(len(content), end + SEARCH_CONTEXT_CHARS)
+    printable = "".join(c if c.isprintable() else " " for c in content[lo:hi])
+    snippet = " ".join(printable.split())
+    prefix = ELLIPSIS if lo > 0 else ""
+    suffix = ELLIPSIS if hi < len(content) else ""
+    return f"{prefix}{snippet}{suffix}"
+
+
+def search_in_file(filepath: str, keyword: str, whole_word: bool = False) -> dict:
+    """Case-insensitive literal search for ``keyword`` in any file ``read_file`` supports.
+
+    Match offsets index into the same extracted text ``read_file`` returns. Never raises:
+    every failure (including read/extraction errors) is returned as an error envelope.
+    """
+    try:
+        keyword = _validate_keyword(keyword, whole_word)
+        content, metadata = _load_document(filepath)
+        is_pdf = "page_count" in metadata
+
+        matches, total = [], 0
+        for match in _keyword_pattern(keyword, whole_word).finditer(content):
+            total += 1
+            if len(matches) >= MAX_SEARCH_MATCHES:
+                continue
+            start, end = match.span()
+            matches.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "matched_text": match.group(),
+                    "line_number": content.count("\n", 0, start) + 1,
+                    "page": content.count("\f", 0, start) + 1 if is_pdf else None,
+                    "context": _match_context(content, start, end),
+                }
+            )
+        return _ok(
+            {
+                "path": metadata["path"],
+                "keyword": keyword,
+                "whole_word": whole_word,
+                "found": total > 0,
+                "total_matches": total,
+                "returned_matches": len(matches),
+                "truncated": total > len(matches),
+                "matches": matches,
+                "warnings": metadata["warnings"],
+            }
+        )
+    except FsToolError as exc:
+        return _err(exc.code, exc.message)
+    except Exception:
+        logger.exception("search_in_file failed unexpectedly")
+        return _err(ErrorCode.INTERNAL_ERROR, "Unexpected internal error while searching the file.")
