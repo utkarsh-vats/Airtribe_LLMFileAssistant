@@ -23,6 +23,7 @@ dist/
 output/
 outputs/
 sample_data/output/
+sample_data/summaries/
 
 # Editors / OS
 .vscode/
