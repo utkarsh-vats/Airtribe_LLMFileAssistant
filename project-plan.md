@@ -10,8 +10,8 @@ Vertical slices; each one leaves `ruff check .`, `ruff format --check .` (and, f
       `sample_data/edge_cases/` (corrupt PDF, empty file).
 - [x] **3. Sandbox + envelope + read_file** – path sandbox, result envelope, `FsToolError`,
       `read_file` for TXT/PDF/DOCX + tests; add `pytest` to CI.
-- [ ] **4. list_files** + tests.
-- [ ] **5. write_file** (atomic, text-only, parent dirs, `overwritten` flag) + tests.
+- [x] **4. list_files** + tests.
+- [x] **5. write_file** (atomic, text-only, parent dirs, `overwritten` flag) + tests.
 - [ ] **6. search_in_file** (shared extraction, case-insensitive, positions + context) + tests.
 - [ ] **7. Tool registry** – JSON schemas + dispatcher (exceptions → envelope) + tests.
 - [ ] **8. Providers** – `LLMProvider` ABC + provider registry + Gemini provider (AFC disabled) +
