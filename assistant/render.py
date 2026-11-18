@@ -25,6 +25,7 @@ def _plural(count: int, word: str) -> str:
 
 
 def shorten(text: str, limit: int = MAX_ARG_CHARS) -> str:
+    """Return ``text``, cut to ``limit`` characters with a trailing ellipsis if longer."""
     return text if len(text) <= limit else text[: limit - 1] + ELLIPSIS
 
 
@@ -67,6 +68,7 @@ class Renderer:
     """Turns agent events and results into console output."""
 
     def __init__(self, console: Console, *, verbose: bool = False) -> None:
+        """Render to ``console``; ``verbose`` also prints every tool result as JSON."""
         self.console = console
         self.verbose = verbose
         self._status: Status | None = None
@@ -75,11 +77,13 @@ class Renderer:
     # --- Spinner --------------------------------------------------------------------------
 
     def start_thinking(self) -> None:
+        """Show the "Thinking..." spinner; a no-op if one is running or output isn't a terminal."""
         if self._status is None and self.console.is_terminal:
             self._status = self.console.status(Text(f"Thinking{ELLIPSIS}"))
             self._status.start()
 
     def stop_thinking(self) -> None:
+        """Remove the spinner, if one is showing."""
         if self._status is not None:
             self._status.stop()
             self._status = None
@@ -87,6 +91,7 @@ class Renderer:
     # --- Output ---------------------------------------------------------------------------
 
     def banner(self, provider: str, model: str, workspace: str, tools: list[str]) -> None:
+        """Print the startup panel: provider, model, workspace path and tool names."""
         body = Text()
         for label, value in (
             ("provider", provider),
@@ -100,6 +105,12 @@ class Renderer:
         self.console.print(Panel(body, title="LLM File Assistant", border_style="cyan"))
 
     def on_event(self, event: AgentEvent) -> None:
+        """Render one agent event; pass this method to ``Agent(on_event=...)``.
+
+        A ``ModelTurn`` with tool calls prints "Step i" (plus any interim text, dimmed); each
+        tool call prints a "->" line when it starts and a summary line with its duration when it
+        finishes. The spinner pauses while tools run and resumes after the turn's last call.
+        """
         if isinstance(event, ModelTurn):
             self.stop_thinking()
             if event.tool_calls:
@@ -125,6 +136,12 @@ class Renderer:
                 self.start_thinking()
 
     def result(self, result: AgentResult) -> None:
+        """Print the outcome of a run.
+
+        ``completed``: the answer as Markdown in a panel. ``max_iterations``: a yellow note.
+        Both are followed by a dim footer (iterations, tool calls, total tokens).
+        ``provider_error``: a red panel with the error message and no footer.
+        """
         self.stop_thinking()
         if result.stopped_reason == "provider_error":
             self.console.print(

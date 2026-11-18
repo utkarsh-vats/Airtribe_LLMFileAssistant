@@ -27,6 +27,7 @@ class FakeProvider(LLMProvider):
     name = "fake"
 
     def __init__(self, script: Iterable[LLMResponse] = ()) -> None:
+        """Copy ``script``; each ``generate()`` call consumes its next response."""
         self._script = list(script)
         self._served = 0
         self._next_id = 0
@@ -55,6 +56,15 @@ class FakeProvider(LLMProvider):
     def generate(
         self, system_prompt: str, messages: Sequence[Message], tools: list[dict]
     ) -> LLMResponse:
+        """Record the call and return the next scripted response.
+
+        Fake-specific: the inputs are ignored except for being deep-copied into ``.calls``
+        (even when the script is exhausted), and tool calls with an empty id get the next
+        ``call_<n>`` id. ``provider_state`` is returned exactly as scripted.
+
+        Raises:
+            LLMProviderError: If the script is exhausted (not retryable).
+        """
         self.calls.append(
             RecordedCall(
                 system_prompt=system_prompt,

@@ -40,6 +40,15 @@ StoppedReason = Literal["completed", "max_iterations", "provider_error"]
 
 @dataclass(frozen=True)
 class ModelTurn:
+    """Emitted after every ``generate()`` call, before any of its tool calls run.
+
+    Attributes:
+        iteration: 1-based number of this model turn within the current ``run()``.
+        text: Text the model returned this turn (interim commentary or the final answer).
+        tool_calls: Tool calls the model requested; empty on the final turn.
+        usage: The provider's token counts for this turn, or ``None`` if it reported none.
+    """
+
     iteration: int
     text: str | None
     tool_calls: list[ToolCall]
@@ -48,11 +57,25 @@ class ModelTurn:
 
 @dataclass(frozen=True)
 class ToolCallStarted:
+    """Emitted just before a tool call is dispatched.
+
+    Attributes:
+        call: The tool call about to run.
+    """
+
     call: ToolCall
 
 
 @dataclass(frozen=True)
 class ToolCallFinished:
+    """Emitted after a tool call returns.
+
+    Attributes:
+        call: The tool call that ran.
+        result: The dispatcher envelope ``{"success", "data", "error"}`` sent back to the model.
+        duration_ms: Wall time of the dispatch, measured with the agent's injected clock.
+    """
+
     call: ToolCall
     result: dict
     duration_ms: float
@@ -63,6 +86,20 @@ AgentEvent = ModelTurn | ToolCallStarted | ToolCallFinished
 
 @dataclass(frozen=True)
 class AgentResult:
+    """Outcome of one ``Agent.run()`` call.
+
+    Attributes:
+        text: The final answer; the fixed limit message for ``"max_iterations"``; ``None`` for
+            ``"provider_error"``.
+        stopped_reason: ``"completed"`` (the model answered), ``"max_iterations"`` (the cap was
+            reached with tool calls pending) or ``"provider_error"`` (the LLM call failed).
+        iterations: Number of ``generate()`` calls made, including a failed one.
+        tool_calls: ``(ToolCall, envelope)`` pairs for every tool call actually executed.
+        usage: Numeric token counts summed across all turns; empty if none were reported.
+        error: The provider's user-safe error message when ``stopped_reason`` is
+            ``"provider_error"``, else ``None``.
+    """
+
     text: str | None
     stopped_reason: StoppedReason
     iterations: int  # generate() calls made during this run
@@ -82,6 +119,11 @@ def _max_iterations_from_env() -> int:
 
 
 class Agent:
+    """Runs the function-calling loop for one conversation.
+
+    ``history`` persists across ``run()`` calls, so a REPL session is multi-turn.
+    """
+
     def __init__(
         self,
         provider: LLMProvider,
@@ -93,6 +135,24 @@ class Agent:
         on_event: Callable[[AgentEvent], None] | None = None,
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
+        """Configure the agent; nothing is sent to the provider until ``run()``.
+
+        Args:
+            provider: The LLM backend.
+            system_prompt: Sent with every ``generate()`` call.
+            max_iterations: Cap on ``generate()`` calls per ``run()``; ``None`` reads
+                ``MAX_TOOL_ITERATIONS`` from the environment, defaulting to 10.
+            dispatch: Runs one tool call and returns its envelope; ``registry.dispatch`` by
+                default, injectable for tests.
+            tools: Tool schemas sent to the model; ``None`` means ``registry.get_tool_schemas()``.
+            on_event: Called with each ``ModelTurn`` / ``ToolCallStarted`` /
+                ``ToolCallFinished`` event.
+            clock: Seconds counter used to time tool calls; injectable for tests.
+
+        Raises:
+            ValueError: If the iteration cap is below 1 or ``MAX_TOOL_ITERATIONS`` is not an
+                integer.
+        """
         self.provider = provider
         self.system_prompt = system_prompt
         self.max_iterations = (
@@ -107,6 +167,7 @@ class Agent:
         self._clock = clock
 
     def reset(self) -> None:
+        """Forget the conversation: the next ``run()`` starts with an empty history."""
         self.history.clear()
 
     def run(self, user_text: str) -> AgentResult:

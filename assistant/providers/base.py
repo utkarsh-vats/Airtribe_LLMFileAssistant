@@ -61,6 +61,7 @@ class LLMProviderError(Exception):
     """
 
     def __init__(self, message: str, *, retryable: bool = False) -> None:
+        """Store the user-safe ``message`` (also ``str(exc)``) and the ``retryable`` flag."""
         super().__init__(message)
         self.message = message
         self.retryable = retryable

@@ -33,6 +33,7 @@ _PROVIDERS: dict[str, str] = {
 
 
 def available_providers() -> list[str]:
+    """Registered provider names, sorted; listing them imports no provider module."""
     return sorted(_PROVIDERS)
 
 

@@ -77,6 +77,12 @@ _NETWORK_ERRORS = _network_errors()
 
 
 class GeminiProvider(LLMProvider):
+    """Google Gemini through ``google-genai``, with automatic function calling disabled.
+
+    The agent loop runs every tool call itself; this class only converts types, calls the API
+    and maps failures to ``LLMProviderError``, retrying the transient ones.
+    """
+
     name = "gemini"
 
     def __init__(
@@ -87,6 +93,20 @@ class GeminiProvider(LLMProvider):
         max_retries: int = 2,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        """Resolve the key and model and build (or accept) the SDK client.
+
+        Args:
+            api_key: Gemini API key; falls back to ``GEMINI_API_KEY`` in ``os.environ``.
+            model: Model id; falls back to ``GEMINI_MODEL`` in ``os.environ``.
+            client: A ``google.genai.Client`` (or a test double with ``models.generate_content``);
+                ``None`` builds a real client from ``api_key``.
+            max_retries: Extra attempts for retryable failures (backoff 1 s, 2 s, ...).
+            sleep: Used for the backoff waits; injectable so tests don't sleep.
+
+        Raises:
+            LLMProviderError: If the key or model is missing (naming the env var, never the
+                key) or the client can't be created.
+        """
         api_key = (api_key or os.environ.get(API_KEY_ENV) or "").strip()
         model = (model or os.environ.get(MODEL_ENV) or "").strip()
         if not api_key:
@@ -114,6 +134,19 @@ class GeminiProvider(LLMProvider):
     def generate(
         self, system_prompt: str, messages: Sequence[Message], tools: list[dict]
     ) -> LLMResponse:
+        """Send the conversation to Gemini and map its reply to an ``LLMResponse``.
+
+        Gemini-specific: an assistant message whose ``provider_state`` is a ``types.Content``
+        is replayed as that exact object, preserving its thought signatures; the response's
+        ``provider_state`` is the candidate's raw ``Content`` for the loop to store and hand
+        back. Function calls without an id get positional ``gemini_call_<n>`` ids, which are
+        never sent back to Gemini. Retryable failures (429, 5xx, network, malformed or empty
+        responses) are retried with backoff up to ``max_retries`` times.
+
+        Raises:
+            LLMProviderError: On a blocked prompt or response, a non-retryable API error, or
+                once retries are exhausted.
+        """
         contents = [_to_content(message) for message in messages]
         config = _build_config(system_prompt, tools)
         for attempt in range(self._max_retries + 1):

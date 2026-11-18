@@ -28,6 +28,15 @@ _PYTHON_TYPES = {"string": str, "boolean": bool}
 
 @dataclass(frozen=True)
 class ToolSpec:
+    """One tool as exposed to the LLM.
+
+    Attributes:
+        name: Tool name the model calls; equals the ``fs_tools`` function name.
+        description: Guidance for the model on when and how to use the tool.
+        parameters: JSON Schema for the arguments, in the portable subset (see module docstring).
+        func: The ``fs_tools`` function that ``dispatch`` calls with the validated arguments.
+    """
+
     name: str
     description: str
     parameters: dict

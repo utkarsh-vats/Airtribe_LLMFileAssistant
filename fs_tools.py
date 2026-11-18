@@ -44,6 +44,11 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0d-\x1f\x7f-\x9f]")
 
 
 class ErrorCode(StrEnum):
+    """Stable error codes returned in error envelopes; DESIGN.md section 2 describes each one.
+
+    A ``StrEnum``, so members compare equal to their plain string values.
+    """
+
     INVALID_ARGUMENT = "INVALID_ARGUMENT"
     PATH_OUTSIDE_WORKSPACE = "PATH_OUTSIDE_WORKSPACE"
     FILE_NOT_FOUND = "FILE_NOT_FOUND"
@@ -63,6 +68,7 @@ class FsToolError(Exception):
     """A tool failure with a stable error code and a message that is safe to show the LLM."""
 
     def __init__(self, code: ErrorCode, message: str) -> None:
+        """Store ``code`` and ``message``; ``str(exc)`` is ``"CODE: message"``."""
         super().__init__(f"{code}: {message}")
         self.code = code
         self.message = message

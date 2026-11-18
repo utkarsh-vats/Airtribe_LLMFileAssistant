@@ -39,6 +39,7 @@ Commands:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser; ``--provider`` choices exclude ``fake``."""
     parser = argparse.ArgumentParser(
         prog="llm_file_assistant.py",
         description="Ask an LLM questions about resume files; it answers by calling file tools.",
@@ -94,6 +95,7 @@ def _first_sentence(text: str) -> str:
 
 
 def run_query(agent: Agent, renderer: Renderer, text: str) -> AgentResult:
+    """Ask the agent one question with the spinner showing, render the outcome, return it."""
     renderer.start_thinking()
     try:
         result = agent.run(text)
@@ -104,6 +106,14 @@ def run_query(agent: Agent, renderer: Renderer, text: str) -> AgentResult:
 
 
 def repl(agent: Agent, renderer: Renderer, input_fn: Callable[[str], str]) -> int:
+    """Run the interactive loop until /exit, /quit, EOF or Ctrl-C at the prompt.
+
+    One ``agent`` serves the whole session, so questions share history. Ctrl-C while a
+    question is running discards that turn and returns to the prompt.
+
+    Returns:
+        Always 0.
+    """
     console = renderer.console
     console.print(Text("Type a question, or /help for commands.", style="dim"))
     while True:
@@ -147,6 +157,21 @@ def main(
     console: Console | None = None,
     load_env: bool = True,
 ) -> int:
+    """Parse arguments, set up the environment and run one-shot mode or the REPL.
+
+    Args:
+        argv: Command-line arguments without the program name; ``None`` means ``sys.argv[1:]``.
+        provider_factory: Builds the provider from its name and keyword arguments; tests pass
+            one that returns a ``FakeProvider``.
+        input_fn: Reads one REPL line given the prompt.
+        console: Rich console for all output; ``None`` creates one (and, on Windows, switches
+            stdout/stderr to UTF-8).
+        load_env: Whether to load ``.env``; tests pass ``False``.
+
+    Returns:
+        The exit code: 0 for a completed one-shot answer or a REPL session, 1 for a one-shot
+        run that didn't complete, 2 for a startup error.
+    """
     args = build_parser().parse_args(argv)
     if load_env:
         load_dotenv(override=False)  # real environment variables win over .env
