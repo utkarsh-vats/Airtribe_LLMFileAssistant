@@ -16,6 +16,6 @@ Vertical slices; each one leaves `ruff check .`, `ruff format --check .` (and, f
 - [x] **7. Tool registry** – JSON schemas + dispatcher (exceptions → envelope) + tests.
 - [x] **8a. Provider abstraction + lazy registry + FakeProvider**
 - [x] **8b. Gemini provider (manual function calling, error mapping, retries)**
-- [ ] **9. Agent loop** + tests with `FakeProvider` (multi-call turns, errors, iteration cap).
-- [ ] **10. CLI** – REPL, `--query`, rich tool-call trace.
+- [x] **9. Agent loop** + tests with `FakeProvider` (multi-call turns, errors, iteration cap).
+- [x] **10. CLI** – REPL, `--query`, rich tool-call trace.
 - [ ] **11. README + demo** – setup, usage, architecture, example queries, demo script.
