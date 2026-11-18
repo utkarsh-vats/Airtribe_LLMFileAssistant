@@ -29,6 +29,7 @@ Planned layout:
 | `assistant/registry.py` | Tool JSON schemas + dispatcher |
 | `assistant/agent.py` | Agent loop, `AgentResult`, events |
 | `assistant/prompts.py` | `DEFAULT_SYSTEM_PROMPT` |
+| `assistant/render.py` | Rich rendering of agent events and results, `summarize_result` |
 | `assistant/providers/__init__.py` | Provider registry (`get_provider`, lazy imports) |
 | `assistant/providers/base.py` | `LLMProvider` ABC, neutral message/tool-call types, `LLMProviderError` |
 | `assistant/providers/fake.py` | `FakeProvider`: scripted responses for tests and offline demos |
@@ -345,14 +346,49 @@ Config (`GEMINI_API_KEY`, `GEMINI_MODEL`, `WORKSPACE_ROOT`, `MAX_TOOL_ITERATIONS
 
 ## 7. CLI
 
-`python llm_file_assistant.py` starts an interactive REPL (`exit`/`quit`/Ctrl-D to leave; history kept
-across turns). `python llm_file_assistant.py --query "..."` runs one question and exits (non-zero on
-failure). Options: `--provider`, `--model`, `--workspace`, `--max-iterations`, overriding env vars.
+`llm_file_assistant.py` (argument parsing, startup, REPL) plus `assistant/render.py` (all
+output). `main(argv=None, *, provider_factory=get_provider, input_fn=input, console=None,
+load_env=True) -> int`, so tests inject a `FakeProvider`, scripted input and a recording console.
 
-Every tool call is rendered with `rich` as it happens – tool name, arguments, and a short result
-(success + key fields, or error code/message, truncated) – so a demo shows exactly what the model
-did. The final answer is rendered as Markdown. A missing API key gives a clear message, not a
-traceback.
+| Option | Effect |
+|---|---|
+| `-q/--query TEXT` | one-shot mode; without it, the REPL starts |
+| `--provider` | default `gemini`; choices are the registered providers minus `fake` (it needs a script) |
+| `--model` | overrides `GEMINI_MODEL` |
+| `--workspace PATH` | overrides `WORKSPACE_ROOT`; must be an existing directory |
+| `--max-iterations N` | overrides `MAX_TOOL_ITERATIONS` |
+| `--verbose` | also prints every tool result as pretty JSON |
+| `--debug` | root logging at DEBUG |
+
+**Startup**: load `.env` (`override=False`, so real environment variables win); root logging at
+WARNING and the `pypdf` logger at ERROR (even with `--debug`), so "EOF marker not found" never
+reaches the demo; on Windows, stdout/stderr are reconfigured to UTF-8 (`errors="replace"`). The
+effective workspace (flag, else env, else `./sample_data`) must exist, else a friendly error and
+exit 2; it is then exported as an absolute `WORKSPACE_ROOT`. A provider that can't be built (missing
+key/model) prints its message plus a pointer to `.env.example` and exits 2, as does an invalid
+iteration cap.
+
+**Rendering** (`Renderer`, driven only by agent events; strings are wrapped in `rich.text.Text` so
+file content can't inject console markup):
+
+- Banner panel: provider, model, absolute workspace, tool names.
+- A "Thinking…" status spinner while waiting for the model (terminals only; it pauses while tools
+  run and resumes after the last call of a turn).
+- `ModelTurn` with tool calls → "Step i" plus any interim model text, dimmed.
+- `ToolCallStarted` → `→ tool_name(arg='value', …)`, values over 40 characters shortened.
+- `ToolCallFinished` → one line from the pure `summarize_result(name, result)` plus the duration:
+  `✓ 1,234 chars · 2 pages` (+ warnings), `✓ 8 files`, `✓ 9 matches` / `✓ no matches`,
+  `✓ wrote summaries/x.md (131 B, overwritten)`, or `✗ CODE: message` for any error envelope.
+- Final answer as Markdown in a panel, with a dim footer: iterations · tool calls · total tokens.
+  `max_iterations` → a yellow note; `provider_error` → a red panel with the safe error message.
+
+**REPL**: prompt `you> `, one `Agent` for the whole session (multi-turn history). Commands `/help`,
+`/tools` (each tool with the first sentence of its description), `/reset` (clears history and
+confirms), `/exit`, `/quit`. Empty input is ignored; Ctrl-D/EOF or Ctrl-C at the prompt exits with
+"Goodbye!" and no traceback; Ctrl-C while a question is running discards that turn from the history
+and returns to the prompt.
+
+**Exit codes**: one-shot 0 if `completed`, else 1; the REPL exits 0; startup errors exit 2.
 
 ## 8. Testing
 
