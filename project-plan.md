@@ -5,10 +5,10 @@ Vertical slices; each one leaves `ruff check .`, `ruff format --check .` (and, f
 
 - [x] **1. Scaffold + docs + CI (lint)** – layout, requirements, `pyproject.toml`, `.env.example`,
       `.gitignore`, DESIGN.md, this plan, GitHub Actions running ruff.
-- [ ] **2. Sample data** – `scripts/generate_samples.py` producing 8 resumes in
+- [x] **2. Sample data** – `scripts/generate_samples.py` producing 8 resumes in
       `sample_data/resumes/` (3 PDF, 3 DOCX, 2 TXT) with varied skills, plus
       `sample_data/edge_cases/` (corrupt PDF, empty file).
-- [ ] **3. Sandbox + envelope + read_file** – path sandbox, result envelope, `FsToolError`,
+- [x] **3. Sandbox + envelope + read_file** – path sandbox, result envelope, `FsToolError`,
       `read_file` for TXT/PDF/DOCX + tests; add `pytest` to CI.
 - [ ] **4. list_files** + tests.
 - [ ] **5. write_file** (atomic, text-only, parent dirs, `overwritten` flag) + tests.
