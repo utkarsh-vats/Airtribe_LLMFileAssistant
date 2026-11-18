@@ -71,8 +71,15 @@ Representative `data` payloads:
 | `search_in_file` | `{"path", "keyword", "match_count", "matches": [{"position", "line", "context"}]}` |
 
 **`list_files`** returns a `list` per spec – one dict per file:
-`{"name", "path", "extension", "size_bytes", "modified"}`, sorted by path for determinism. Because a
-bare list has no room for an error, it **raises** `FsToolError` on failure.
+`{"name", "path", "extension", "size_bytes", "modified", "supported"}` (`extension` lowercase with
+dot; `supported` = readable by `read_file`), sorted by name case-insensitively for determinism. It
+is non-recursive and lists files only; `""` and `"."` mean the workspace root. Dotfiles are skipped,
+as are entries that are symlinks resolving outside the workspace (their metadata is never
+returned). The extension filter is case-insensitive and accepts `pdf`, `.pdf`, `.PDF` or `*.pdf`;
+`None` or blank means no filter, and anything that isn't a plain extension after normalisation is
+`INVALID_ARGUMENT`. An empty directory or no matches is `[]`, not an error. Because a bare list has
+no room for an error, it **raises** `FsToolError` on failure (`PATH_OUTSIDE_WORKSPACE`,
+`NOT_FOUND`, `NOT_A_DIRECTORY`, `PERMISSION_DENIED`, `INVALID_ARGUMENT`).
 
 **`FsToolError(code, message)`** is the single typed exception used internally by all tools. The
 dict-returning tools catch it and build the error envelope; `list_files` lets it propagate.

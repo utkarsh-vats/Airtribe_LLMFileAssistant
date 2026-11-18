@@ -8,12 +8,14 @@ Exposes four tools intended to be called by an LLM via function calling:
 - ``search_in_file(filepath, keyword) -> dict``
 
 All paths are resolved inside ``WORKSPACE_ROOT``. See DESIGN.md for the
-result envelope, error codes and sandbox rules. ``read_file`` is implemented;
-the other tools land in later steps of project-plan.md.
+result envelope, error codes and sandbox rules. ``read_file`` and
+``list_files`` are implemented; the other tools land in later steps of
+project-plan.md.
 """
 
 import logging
 import os
+import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -31,6 +33,7 @@ TEXT_EXTENSIONS = frozenset({".txt", ".md"})
 READ_EXTENSIONS = TEXT_EXTENSIONS | {".pdf", ".docx"}
 TEXT_ENCODINGS = ("utf-8", "cp1252", "latin-1")  # latin-1 decodes any byte sequence
 PDF_PAGE_SEPARATOR = "\n\f\n"  # form feed between pages, as pdftotext does
+_PLAIN_EXTENSION = re.compile(r"\.[a-z0-9_-]+")
 
 
 class ErrorCode(StrEnum):
@@ -103,6 +106,10 @@ def _display_path(path: Path) -> str:
     """Workspace-relative path with forward slashes, identical on Windows and Linux."""
     relative = path.relative_to(_workspace_root()).as_posix()
     return relative if relative != "." else ""
+
+
+def _iso_utc(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, tz=UTC).isoformat()
 
 
 def _os_error(exc: OSError, display: str) -> FsToolError:
@@ -227,7 +234,7 @@ def read_file(filepath: str) -> dict:
             "name": path.name,
             "extension": extension,
             "size_bytes": stat.st_size,
-            "modified": datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
+            "modified": _iso_utc(stat.st_mtime),
             "char_count": len(content),
             "word_count": len(content.split()),
             **format_metadata,
@@ -239,3 +246,72 @@ def read_file(filepath: str) -> dict:
     except Exception:
         logger.exception("read_file failed unexpectedly")
         return _err(ErrorCode.INTERNAL_ERROR, "Unexpected internal error while reading the file.")
+
+
+def _normalise_extension(extension: str | None) -> str | None:
+    """Turn "pdf", ".PDF" or "*.pdf" into ".pdf"; None or blank means no filter."""
+    if extension is None:
+        return None
+    if not isinstance(extension, str):
+        raise FsToolError(ErrorCode.INVALID_ARGUMENT, "Extension must be a string.")
+    value = extension.strip().lower()
+    if not value:
+        return None
+    value = value.removeprefix("*")
+    if not value.startswith("."):
+        value = f".{value}"
+    if not _PLAIN_EXTENSION.fullmatch(value):
+        raise FsToolError(
+            ErrorCode.INVALID_ARGUMENT,
+            f"Invalid extension filter '{extension}'; use a plain extension such as 'pdf'.",
+        )
+    return value
+
+
+def list_files(directory: str, extension: str | None = None) -> list:
+    """List the files (non-recursive) in a workspace directory, optionally filtered by extension.
+
+    ``""`` and ``"."`` mean the workspace root. Dotfiles and symlinks that resolve outside the
+    workspace are skipped. Raises ``FsToolError`` on failure; the tool dispatcher wraps it.
+    """
+    root = _workspace_root()
+    path = root if directory in ("", ".") else _resolve_path(directory)
+    wanted = _normalise_extension(extension)
+    display = _display_path(path) or "."
+
+    try:
+        if not path.exists():
+            raise FsToolError(ErrorCode.NOT_FOUND, f"Directory '{display}' does not exist.")
+        if not path.is_dir():
+            raise FsToolError(ErrorCode.NOT_A_DIRECTORY, f"'{display}' is not a directory.")
+        entries = list(path.iterdir())
+    except OSError as exc:
+        raise _os_error(exc, display) from exc
+
+    files = []
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        suffix = entry.suffix.lower()
+        if wanted is not None and suffix != wanted:
+            continue
+        try:
+            target = entry.resolve(strict=False)
+            if not target.is_relative_to(root) or not target.is_file():
+                continue  # symlink escape (never leak its metadata) or not a regular file
+            stat = target.stat()
+        except OSError:
+            logger.debug("skipping unreadable entry %s", entry.name)
+            continue
+        files.append(
+            {
+                "name": entry.name,
+                "path": _display_path(entry),
+                "extension": suffix,
+                "size_bytes": stat.st_size,
+                "modified": _iso_utc(stat.st_mtime),
+                "supported": suffix in READ_EXTENSIONS,
+            }
+        )
+    files.sort(key=lambda f: (f["name"].casefold(), f["name"]))
+    return files
